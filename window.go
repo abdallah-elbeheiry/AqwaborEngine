@@ -311,7 +311,7 @@ func triangulate(poly []Vertex) []Vertex {
 				continue
 			}
 			inside := false
-			for j := 0; j < m; j++ {
+			for j := range m {
 				if j == prevI || j == i || j == nextI {
 					continue
 				}
