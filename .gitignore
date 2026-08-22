@@ -1,0 +1,46 @@
+# Binaries
+/AqwaborEngine
+/aqwabor
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+/bin/
+
+# Go
+vendor/
+go.work
+go.work.sum
+
+# IDE
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Temp
+/tmp/
+.cache/
+*.log
+*.tmp
+
+# GoLand build cache
+/.cache/JetBrains/
+
+# Coverage
+coverage.out
+coverage.html
+*.cover
