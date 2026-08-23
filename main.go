@@ -1,6 +1,7 @@
 package main
 
 import (
+	"aqwabor/schedulers"
 	"log"
 
 	"github.com/gogpu/gogpu"
@@ -17,10 +18,10 @@ func runWindowDemo() {
 	}
 	defer win.Close()
 
-	loop := NewLoop(60)
-	loop.Do(func() {})
-	loop.Start()
-	defer loop.Stop()
+	s := schedulers.NewScheduler()
+	s.Run(func(st schedulers.TickState) {}, 60.0)
+	s.Start()
+	defer s.Stop()
 
 	quad := []Vertex{
 		{X: -0.5, Y: -0.5, R: 1.0, G: 0.0, B: 0.0, A: 1},

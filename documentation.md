@@ -19,7 +19,7 @@ Build: `CGO_ENABLED=0 go run .`
 
 ---
 
-## Loop (`loop.go`)
+## Loop (`schedulers/loop.go`)
 
 Single-threaded, deterministic. One goroutine ticks, tasks run in order every tick. No steps are skipped — if overloaded it lags but stays correct.
 
@@ -104,6 +104,6 @@ Pipeline: vertex `pos@0 vec2` + `color@1 vec4`, stride 24, `TriangleList`, `vs_m
 ## Notes
 
 - No `internal/` — `Loop`, `Task`, `Vertex`, `Window` are in `package main` directly.
-- Single file per concern: `loop.go` (≈490 lines), `window.go` (≈320 lines with embedded shaders), `main.go` (≈90 lines), `shaders/*.wgsl` independent.
+- Single file per concern: `schedulers/loop.go` (≈490 lines), `window.go` (≈320 lines with embedded shaders), `main.go` (≈90 lines), `shaders/*.wgsl` independent.
 - `.gitignore` covers binaries (`AqwaborEngine`, `*.test`, `*.out`), `vendor/`, `.idea/`, `.vscode/`, `.DS_Store`, `/tmp/`.
 - Pure Go, `CGO_ENABLED=0`, `go 1.26`.
