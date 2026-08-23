@@ -120,81 +120,6 @@ func TestTapVsHold(t *testing.T) {
 	}
 }
 
-func TestDoubleTap(t *testing.T) {
-	m, b := newTestManager()
-	a := m.Action("dt")
-	m.BindKey(a, KeySpace)
-	doubles := 0
-	a.OnDoubleTap(func(Context) { doubles++ })
-
-	// A short press+release (duration 0.02s) counts as a tap.
-	tap := func() {
-		b.push(Event{Kind: EventKeyDown, Key: KeySpace})
-		m.Update(0.01)
-		b.push(Event{Kind: EventKeyUp, Key: KeySpace})
-		m.Update(0.01)
-	}
-	// Idle time used to break the double-tap window.
-	gap := func(d float64) { m.Update(d) }
-
-	tap()
-	if doubles != 0 {
-		t.Fatal("single tap should not double")
-	}
-	tap() // within window
-	if doubles != 1 {
-		t.Fatalf("expected double tap, got %d", doubles)
-	}
-
-	// Outside the window: reset.
-	gap(1.0)
-	tap()
-	if doubles != 1 {
-		t.Fatal("tap after gap should not double")
-	}
-	tap()
-	if doubles != 2 {
-		t.Fatalf("expected second double tap, got %d", doubles)
-	}
-}
-
-func TestMultiTap(t *testing.T) {
-	m, b := newTestManager()
-	a := m.Action("mt")
-	m.BindKey(a, KeySpace)
-	triples := 0
-	a.OnMultiTap(3, func(Context) { triples++ })
-
-	tap := func() {
-		b.push(Event{Kind: EventKeyDown, Key: KeySpace})
-		m.Update(0.01)
-		b.push(Event{Kind: EventKeyUp, Key: KeySpace})
-		m.Update(0.01)
-	}
-	gap := func(d float64) { m.Update(d) }
-
-	tap()
-	tap()
-	if triples != 0 {
-		t.Fatal("two taps should not triple")
-	}
-	tap()
-	if triples != 1 {
-		t.Fatalf("expected triple tap, got %d", triples)
-	}
-
-	gap(1.0)
-	tap()
-	tap()
-	if triples != 1 {
-		t.Fatal("tap after gap should reset count")
-	}
-	tap()
-	if triples != 2 {
-		t.Fatalf("expected second triple tap, got %d", triples)
-	}
-}
-
 func TestToggle(t *testing.T) {
 	m, b := newTestManager()
 	a := m.Action("t")
@@ -465,28 +390,6 @@ func TestHoldFrameRateIndependent(t *testing.T) {
 	}
 	if (c30-c240) > 1e-9 || (c240-c30) > 1e-9 {
 		t.Fatalf("frame-rate dependent: c30=%v c240=%v", c30, c240)
-	}
-}
-
-// double-tap re-triggers; six taps => three double-taps.
-func TestDoubleTapContinuous(t *testing.T) {
-	m, b := newTestManager()
-	a := m.Action("dt")
-	m.BindKey(a, KeySpace)
-	doubles := 0
-	a.OnDoubleTap(func(Context) { doubles++ })
-
-	tap := func() {
-		b.push(Event{Kind: EventKeyDown, Key: KeySpace})
-		m.Update(0.01)
-		b.push(Event{Kind: EventKeyUp, Key: KeySpace})
-		m.Update(0.01)
-	}
-	for range 6 {
-		tap()
-	}
-	if doubles != 3 {
-		t.Fatalf("six taps should yield three double-taps, got %d", doubles)
 	}
 }
 

@@ -63,29 +63,6 @@ func Example_toggle() {
 	// Output: true
 }
 
-// Example_doubleTap demonstrates an OnDoubleTap Action.
-func Example_doubleTap() {
-	backend := headless.New()
-	in := input.NewManager(backend)
-
-	attack := in.Action("attack")
-	in.BindKey(attack, input.KeyJ)
-	var doubles int
-	attack.OnDoubleTap(func(input.Context) { doubles++ })
-
-	tap := func(at float64) {
-		backend.KeyDown(input.KeyJ)
-		in.Update(at)
-		backend.KeyUp(input.KeyJ)
-		in.Update(at + 0.01)
-	}
-	tap(0)
-	tap(0.1) // within the double-tap window
-
-	fmt.Println(doubles)
-	// Output: 1
-}
-
 // Example_combo demonstrates a simultaneous key combo.
 func Example_combo() {
 	backend := headless.New()

@@ -11,7 +11,7 @@
 //
 // Raw input arrives through a Backend (e.g. gogpu or headless). The Manager
 // maintains input state (key/button state, mouse position, timers) and
-// derives higher-level events (hold, tap, toggle, double-tap, combo, drag)
+// derives higher-level events (hold, tap, toggle, combo, drag)
 // from it before dispatching to the bound Actions.
 //
 // All event consumption is single-threaded: call Manager.Update once per
@@ -51,8 +51,6 @@ const (
 	EventTypeHold
 	EventTypeTap
 	EventTypeToggle
-	EventTypeDoubleTap
-	EventTypeMultiTap
 	EventTypeDrag
 )
 
@@ -61,13 +59,12 @@ const (
 // convert input into a command stream bound to simulation ticks. Use
 // Manager.SetRecording(true) and Manager.Drain() to collect them.
 type ActionEvent struct {
-	Type     ActionEventType
-	Action   *Action
-	Now      float64 // Manager clock (seconds) at dispatch
-	Dt       float64 // frame delta (seconds) that produced this event
-	Active   bool    // toggle state, for EventTypeToggle
-	DX, DY   float64 // movement delta, for EventTypeDrag
-	TapCount int     // tap index, for EventTypeDoubleTap / EventTypeMultiTap
+	Type   ActionEventType
+	Action *Action
+	Now    float64 // Manager clock (seconds) at dispatch
+	Dt     float64 // frame delta (seconds) that produced this event
+	Active bool    // toggle state, for EventTypeToggle
+	DX, DY float64 // movement delta, for EventTypeDrag
 }
 
 // Backend supplies raw input events to the Manager.
@@ -104,14 +101,11 @@ func (c Context) Now() float64 { return c.now }
 // frame-rate independent: charge += rate*ctx.Dt().
 func (c Context) Dt() float64 { return c.dt }
 
-// Default tuning constants for derived tap/double-tap behaviour.
+// Default tuning constants for derived tap behaviour.
 const (
 	// defaultTapMax is the longest press duration (seconds) that still
 	// counts as a tap when no OnHold threshold is registered.
 	defaultTapMax = 0.22
-	// defaultDoubleTapWindow is the maximum gap (seconds) between two taps
-	// for them to be considered a double-tap.
-	defaultDoubleTapWindow = 0.30
 )
 
 // Manager owns all Actions and drives event processing.
@@ -211,19 +205,18 @@ func (m *Manager) Drain() []ActionEvent {
 }
 
 // record appends a derived event to the buffer when recording is enabled.
-func (m *Manager) record(t ActionEventType, active bool, dx, dy float64, tapCount int) {
+func (m *Manager) record(t ActionEventType, active bool, dx, dy float64) {
 	if !m.recording {
 		return
 	}
 	m.events = append(m.events, ActionEvent{
-		Type:     t,
-		Action:   m.ctx.action,
-		Now:      m.clock,
-		Dt:       m.ctx.dt,
-		Active:   active,
-		DX:       dx,
-		DY:       dy,
-		TapCount: tapCount,
+		Type:   t,
+		Action: m.ctx.action,
+		Now:    m.clock,
+		Dt:     m.ctx.dt,
+		Active: active,
+		DX:     dx,
+		DY:     dy,
 	})
 }
 

@@ -58,12 +58,6 @@ type holdHandler struct {
 	fn        func(Context)
 }
 
-// multiTapHandler pairs a tap count with its callback.
-type multiTapHandler struct {
-	n  int
-	fn func(Context)
-}
-
 // Action is the single user-facing input object. The user binds hardware to
 // it, attaches callbacks to it, and controls it directly via Enable,
 // Disable and Unbind.
@@ -74,23 +68,19 @@ type Action struct {
 
 	bindings []Binding
 
-	onPress     []func(Context)
-	onRelease   []func(Context)
-	onHold      []holdHandler
-	onTap       []func(Context)
-	onToggle    []func(bool, Context)
-	onDoubleTap []func(Context)
-	onMultiTap  []multiTapHandler
-	onDrag      []func(float64, float64, Context)
+	onPress   []func(Context)
+	onRelease []func(Context)
+	onHold    []holdHandler
+	onTap     []func(Context)
+	onToggle  []func(bool, Context)
+	onDrag    []func(float64, float64, Context)
 
 	// Live state.
-	down        bool
-	downTime    float64
-	active      bool // toggle state
-	lastTapTime float64
-	tapCount    int
-	lastDragX   float64
-	lastDragY   float64
+	down      bool
+	downTime  float64
+	active    bool // toggle state
+	lastDragX float64
+	lastDragY float64
 }
 
 // Name returns the Action's identifier.
@@ -144,19 +134,6 @@ func (a *Action) OnTap(fn func(Context)) { a.onTap = append(a.onTap, fn) }
 // toggle state (true after an odd number of presses).
 func (a *Action) OnToggle(fn func(bool, Context)) { a.onToggle = append(a.onToggle, fn) }
 
-// OnDoubleTap registers a callback fired when two taps occur within
-// defaultDoubleTapWindow of each other.
-func (a *Action) OnDoubleTap(fn func(Context)) { a.onDoubleTap = append(a.onDoubleTap, fn) }
-
-// OnMultiTap registers a callback fired when n taps occur within
-// defaultDoubleTapWindow of each other (n >= 2).
-func (a *Action) OnMultiTap(n int, fn func(Context)) {
-	if n < 2 {
-		n = 2
-	}
-	a.onMultiTap = append(a.onMultiTap, multiTapHandler{n, fn})
-}
-
 // OnDrag registers a callback fired whenever the pointer moves while the
 // Action is held. dx, dy are the per-frame movement deltas.
 func (a *Action) OnDrag(fn func(float64, float64, Context)) { a.onDrag = append(a.onDrag, fn) }
@@ -176,11 +153,11 @@ func (a *Action) process(m *Manager) {
 			a.active = !a.active
 			if a.enabled {
 				m.ctx.action = a
-				m.record(EventTypePressed, false, 0, 0, 0)
+				m.record(EventTypePressed, false, 0, 0)
 				for _, fn := range a.onPress {
 					fn(m.ctx)
 				}
-				m.record(EventTypeToggle, a.active, 0, 0, 0)
+				m.record(EventTypeToggle, a.active, 0, 0)
 				for _, fn := range a.onToggle {
 					fn(a.active, m.ctx)
 				}
@@ -189,7 +166,7 @@ func (a *Action) process(m *Manager) {
 			duration := m.clock - a.downTime
 			if a.enabled {
 				m.ctx.action = a
-				m.record(EventTypeReleased, false, 0, 0, 0)
+				m.record(EventTypeReleased, false, 0, 0)
 				for _, fn := range a.onRelease {
 					fn(m.ctx)
 				}
@@ -202,7 +179,7 @@ func (a *Action) process(m *Manager) {
 		m.ctx.action = a
 		for _, h := range a.onHold {
 			if m.clock-a.downTime >= h.threshold {
-				m.record(EventTypeHold, false, 0, 0, 0)
+				m.record(EventTypeHold, false, 0, 0)
 				h.fn(m.ctx)
 			}
 		}
@@ -212,7 +189,7 @@ func (a *Action) process(m *Manager) {
 			a.lastDragX, a.lastDragY = m.mouseX, m.mouseY
 			if dx != 0 || dy != 0 {
 				m.ctx.action = a
-				m.record(EventTypeDrag, false, dx, dy, 0)
+				m.record(EventTypeDrag, false, dx, dy)
 				for _, fn := range a.onDrag {
 					fn(dx, dy, m.ctx)
 				}
@@ -221,44 +198,15 @@ func (a *Action) process(m *Manager) {
 	}
 }
 
-// handleTap fires tap/double-tap/multi-tap callbacks for a completed press
-// whose duration qualifies as a tap.
+// handleTap fires the tap callback for a completed press whose duration
+// qualifies as a tap.
 func (a *Action) handleTap(duration float64, m *Manager) {
 	if duration > defaultTapMax {
 		return
 	}
 
-	m.record(EventTypeTap, false, 0, 0, 0)
+	m.record(EventTypeTap, false, 0, 0)
 	for _, fn := range a.onTap {
 		fn(m.ctx)
-	}
-
-	if m.clock-a.lastTapTime <= defaultDoubleTapWindow {
-		a.tapCount++
-	} else {
-		a.tapCount = 1
-	}
-	a.lastTapTime = m.clock
-
-	fired := false
-	if a.tapCount == 2 {
-		for _, fn := range a.onDoubleTap {
-			m.record(EventTypeDoubleTap, false, 0, 0, 2)
-			fn(m.ctx)
-			fired = true
-		}
-	}
-	for _, h := range a.onMultiTap {
-		if a.tapCount == h.n {
-			m.record(EventTypeMultiTap, false, 0, 0, a.tapCount)
-			h.fn(m.ctx)
-			fired = true
-		}
-	}
-	// Reset only after an actual tap-level event fired, so pairs/sequences
-	// re-trigger (e.g. six taps => three double-taps) and multi-tap counts of
-	// 3+ are not clobbered by an unregistered double-tap slot.
-	if fired {
-		a.tapCount = 0
 	}
 }
