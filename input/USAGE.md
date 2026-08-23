@@ -133,11 +133,66 @@ are fully deterministic.
 
 ## Notes on behaviour
 
-- `OnHold` fires **every frame** the Action has been held past its threshold.
-- `OnTap` fires on release when the press was shorter than the effective tap
-  window — the largest registered `OnHold` threshold, or `0.22s` by default —
-  so a short press is a tap and a long press is a hold with no dead zone.
-- `OnDoubleTap` / `OnMultiTap` require taps within `0.30s` of each other.
-- `OnToggle` flips an internal state on every press edge.
-- Disabled Actions keep their input state up to date, so re-enabling never
-  emits a stale press.
+- `OnHold` fires **every frame** the Action has been held past **its own**
+  threshold. Each `OnHold` handler is gated on its own threshold, so
+  `OnHold(0.1)` and `OnHold(1.0)` fire independently — the 1.0s handler does
+  not raise the gate for the 0.1s handler.
+- Because `OnHold` fires every frame, scale any accumulation by the frame
+  delta so it is frame-rate independent:
+
+  ```go
+  charge := 0.0
+  jump.OnHold(0.4, func(ctx input.Context) {
+      charge += rate * ctx.Dt() // same total regardless of fps
+  })
+  ```
+
+- `OnTap` fires on release when the press was shorter than the fixed tap
+  window of `0.22s`. The tap window does **not** depend on any `OnHold`
+  threshold, so a 1.5s press with an `OnHold(2.0)` is neither a tap nor a
+  hold — a long press is simply not a tap.
+- `OnDoubleTap` / `OnMultiTap` re-trigger: six quick taps yield three
+  double-taps, and three quick taps yield one triple-tap. The tap count resets
+  after each tap-level event.
+- `OnToggle` advances its internal state on every press edge. A press while
+  the Action is **disabled** still advances the toggle state; only the
+  callback delivery is suppressed, so re-enabling yields a consistent logical
+  state.
+- `Unbind` and `Rebind` reset the pressed flag without synthesizing a release,
+  so rebinding while a key is physically held does not emit a fake
+  `OnReleased`/`OnTap`.
+- `Combo` bindings do not currently consume the underlying keys, so a plain
+  Action bound to one of the combo keys still fires alongside the combo.
+  Add a consume/priority model before using modifier combos in a GUI.
+
+## Command stream (Drain) vs callbacks
+
+Callbacks are the ergonomic path for camera and UI. For the simulation,
+prefer a deterministic command stream:
+
+```go
+in.SetRecording(true)
+
+// ... in your fixed-step update:
+in.Update(simDt) // simDt from the scheduler, not wall-clock frame time
+for _, e := range in.Drain() {
+    world.Dispatch(e) // bind events to simulation ticks
+}
+```
+
+`Manager.Drain` returns and clears the derived events recorded since the last
+call (`EventTypePressed`, `Released`, `Hold`, `Tap`, `Toggle`, `DoubleTap`,
+`MultiTap`, `Drag`), each carrying the `Action`, `Now`, `Dt`, and any
+per-event data (`Active`, `DX`/`DY`, `TapCount`). Recording is off by default
+so the plain callback path stays allocation-free.
+
+## Timing, determinism and replay
+
+All derived events (tap, hold, double-tap) are timing based, so `Update` must
+be driven by the **fixed simulation dt** (e.g. the scheduler's tick interval),
+not real wall-clock frame time. The Manager keeps its own clock advanced by
+that `dt`; if you feed it the scheduler's sim dt, the two clocks stay in sync
+and replays are bit-for-bit reproducible.
+
+Because timing is driven by the `dt` you pass to `Update`, headless scenarios
+are fully deterministic.

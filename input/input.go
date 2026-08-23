@@ -42,6 +42,34 @@ type Event struct {
 	X, Y   float64 // valid for mouse events
 }
 
+// ActionEventType enumerates the derived events recorded by Manager.Drain.
+type ActionEventType uint8
+
+const (
+	EventTypePressed ActionEventType = iota
+	EventTypeReleased
+	EventTypeHold
+	EventTypeTap
+	EventTypeToggle
+	EventTypeDoubleTap
+	EventTypeMultiTap
+	EventTypeDrag
+)
+
+// ActionEvent is a recorded, replayable derived event. It mirrors what the
+// callbacks see, but as data instead of function calls, so the game can
+// convert input into a command stream bound to simulation ticks. Use
+// Manager.SetRecording(true) and Manager.Drain() to collect them.
+type ActionEvent struct {
+	Type     ActionEventType
+	Action   *Action
+	Now      float64 // Manager clock (seconds) at dispatch
+	Dt       float64 // frame delta (seconds) that produced this event
+	Active   bool    // toggle state, for EventTypeToggle
+	DX, DY   float64 // movement delta, for EventTypeDrag
+	TapCount int     // tap index, for EventTypeDoubleTap / EventTypeMultiTap
+}
+
 // Backend supplies raw input events to the Manager.
 //
 // Implementations must be safe to call from the same goroutine that calls
@@ -58,6 +86,7 @@ type Context struct {
 	mgr    *Manager
 	action *Action
 	now    float64
+	dt     float64
 }
 
 // MousePosition returns the current pointer position in window coordinates.
@@ -68,6 +97,12 @@ func (c Context) Action() *Action { return c.action }
 
 // Now returns the Manager clock (seconds) at the time of dispatch.
 func (c Context) Now() float64 { return c.now }
+
+// Dt returns the frame delta (seconds) that produced the current dispatch.
+//
+// OnHold fires once per frame, so any accumulation must scale by Dt to be
+// frame-rate independent: charge += rate*ctx.Dt().
+func (c Context) Dt() float64 { return c.dt }
 
 // Default tuning constants for derived tap/double-tap behaviour.
 const (
@@ -94,6 +129,9 @@ type Manager struct {
 	mouseY    float64
 
 	ctx Context
+
+	recording bool
+	events    []ActionEvent
 }
 
 // NewManager creates a Manager fed by the given Backend.
@@ -139,9 +177,10 @@ func (m *Manager) Combo(name string, keys ...Key) *Action {
 }
 
 // Rebind clears an Action's hardware bindings and binds a single key.
-// Callbacks are preserved.
+// Callbacks and live state are preserved (the pressed flag is reset, so no
+// release is synthesized for a key that was physically still held).
 func (m *Manager) Rebind(a *Action, k Key) {
-	a.bindings = nil
+	a.Unbind()
 	m.BindKey(a, k)
 }
 
@@ -156,6 +195,38 @@ func (m *Manager) MousePosition() (x, y float64) { return m.mouseX, m.mouseY }
 // Clock returns the internal clock (seconds) advanced by Update.
 func (m *Manager) Clock() float64 { return m.clock }
 
+// SetRecording enables or disables recording of derived events. When enabled,
+// every dispatched derived event is appended to an internal buffer that
+// Drain returns. Recording is off by default so the default callback path
+// stays allocation-free.
+func (m *Manager) SetRecording(on bool) { m.recording = on }
+
+// Drain returns and clears the derived events recorded since the last call.
+// Use it to build a deterministic command stream for the simulation; attach
+// callbacks on top for non-simulation concerns (camera, UI).
+func (m *Manager) Drain() []ActionEvent {
+	e := m.events
+	m.events = nil
+	return e
+}
+
+// record appends a derived event to the buffer when recording is enabled.
+func (m *Manager) record(t ActionEventType, active bool, dx, dy float64, tapCount int) {
+	if !m.recording {
+		return
+	}
+	m.events = append(m.events, ActionEvent{
+		Type:     t,
+		Action:   m.ctx.action,
+		Now:      m.clock,
+		Dt:       m.ctx.dt,
+		Active:   active,
+		DX:       dx,
+		DY:       dy,
+		TapCount: tapCount,
+	})
+}
+
 // Update advances the simulation by dt seconds, pumps the Backend for new
 // raw events, and dispatches derived events to enabled Actions.
 //
@@ -166,6 +237,7 @@ func (m *Manager) Update(dt float64) {
 	}
 	m.clock += dt
 	m.ctx.now = m.clock
+	m.ctx.dt = dt
 
 	if m.backend != nil {
 		for _, ev := range m.backend.Poll() {

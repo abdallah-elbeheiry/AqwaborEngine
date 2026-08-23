@@ -83,9 +83,6 @@ type Action struct {
 	onMultiTap  []multiTapHandler
 	onDrag      []func(float64, float64, Context)
 
-	// Derived-event tuning.
-	holdThreshold float64
-
 	// Live state.
 	down        bool
 	downTime    float64
@@ -109,8 +106,13 @@ func (a *Action) Enable() { a.enabled = true }
 // for the Action stays up to date so re-enabling does not emit a stale press.
 func (a *Action) Disable() { a.enabled = false }
 
-// Unbind clears all hardware bindings. Callbacks are preserved.
-func (a *Action) Unbind() { a.bindings = nil }
+// Unbind clears all hardware bindings. Callbacks and live state (including
+// the pressed flag) are reset, so no release is synthesized for a key that
+// was physically still held.
+func (a *Action) Unbind() {
+	a.bindings = nil
+	a.down = false
+}
 
 // IsDown reports whether the Action is currently pressed.
 func (a *Action) IsDown() bool { return a.down }
@@ -125,16 +127,17 @@ func (a *Action) OnPressed(fn func(Context)) { a.onPress = append(a.onPress, fn)
 func (a *Action) OnReleased(fn func(Context)) { a.onRelease = append(a.onRelease, fn) }
 
 // OnHold registers a callback fired every frame the Action has been held
-// longer than threshold (seconds). It fires continuously while held.
+// longer than its own threshold (seconds). Each handler is gated on its own
+// threshold, so OnHold(0.1) and OnHold(1.0) fire independently. Because the
+// callback fires every frame, scale accumulations by ctx.Dt() to stay
+// frame-rate independent.
 func (a *Action) OnHold(threshold float64, fn func(Context)) {
 	a.onHold = append(a.onHold, holdHandler{threshold, fn})
-	if threshold > a.holdThreshold {
-		a.holdThreshold = threshold
-	}
 }
 
-// OnTap registers a callback fired on a quick press+release (shorter than
-// the effective tap window: the largest OnHold threshold, or defaultTapMax).
+// OnTap registers a callback fired on a quick press+release, where "quick"
+// means shorter than defaultTapMax (0.22s). The tap window is fixed and does
+// not depend on any OnHold threshold.
 func (a *Action) OnTap(fn func(Context)) { a.onTap = append(a.onTap, fn) }
 
 // OnToggle registers a callback fired on every press edge, carrying the new
@@ -168,12 +171,16 @@ func (a *Action) process(m *Manager) {
 		if down {
 			a.downTime = m.clock
 			a.lastDragX, a.lastDragY = m.mouseX, m.mouseY
+			// Toggle state advances regardless of enabled, so re-enabling
+			// after a press while disabled yields a consistent logical state.
+			a.active = !a.active
 			if a.enabled {
 				m.ctx.action = a
+				m.record(EventTypePressed, false, 0, 0, 0)
 				for _, fn := range a.onPress {
 					fn(m.ctx)
 				}
-				a.active = !a.active
+				m.record(EventTypeToggle, a.active, 0, 0, 0)
 				for _, fn := range a.onToggle {
 					fn(a.active, m.ctx)
 				}
@@ -182,6 +189,7 @@ func (a *Action) process(m *Manager) {
 			duration := m.clock - a.downTime
 			if a.enabled {
 				m.ctx.action = a
+				m.record(EventTypeReleased, false, 0, 0, 0)
 				for _, fn := range a.onRelease {
 					fn(m.ctx)
 				}
@@ -191,9 +199,10 @@ func (a *Action) process(m *Manager) {
 	}
 
 	if a.down && a.enabled {
-		if a.holdThreshold > 0 && m.clock-a.downTime >= a.holdThreshold {
-			m.ctx.action = a
-			for _, h := range a.onHold {
+		m.ctx.action = a
+		for _, h := range a.onHold {
+			if m.clock-a.downTime >= h.threshold {
+				m.record(EventTypeHold, false, 0, 0, 0)
 				h.fn(m.ctx)
 			}
 		}
@@ -203,6 +212,7 @@ func (a *Action) process(m *Manager) {
 			a.lastDragX, a.lastDragY = m.mouseX, m.mouseY
 			if dx != 0 || dy != 0 {
 				m.ctx.action = a
+				m.record(EventTypeDrag, false, dx, dy, 0)
 				for _, fn := range a.onDrag {
 					fn(dx, dy, m.ctx)
 				}
@@ -214,14 +224,11 @@ func (a *Action) process(m *Manager) {
 // handleTap fires tap/double-tap/multi-tap callbacks for a completed press
 // whose duration qualifies as a tap.
 func (a *Action) handleTap(duration float64, m *Manager) {
-	tapMax := a.holdThreshold
-	if tapMax <= 0 {
-		tapMax = defaultTapMax
-	}
-	if duration > tapMax {
+	if duration > defaultTapMax {
 		return
 	}
 
+	m.record(EventTypeTap, false, 0, 0, 0)
 	for _, fn := range a.onTap {
 		fn(m.ctx)
 	}
@@ -233,14 +240,25 @@ func (a *Action) handleTap(duration float64, m *Manager) {
 	}
 	a.lastTapTime = m.clock
 
+	fired := false
 	if a.tapCount == 2 {
 		for _, fn := range a.onDoubleTap {
+			m.record(EventTypeDoubleTap, false, 0, 0, 2)
 			fn(m.ctx)
+			fired = true
 		}
 	}
 	for _, h := range a.onMultiTap {
 		if a.tapCount == h.n {
+			m.record(EventTypeMultiTap, false, 0, 0, a.tapCount)
 			h.fn(m.ctx)
+			fired = true
 		}
+	}
+	// Reset only after an actual tap-level event fired, so pairs/sequences
+	// re-trigger (e.g. six taps => three double-taps) and multi-tap counts of
+	// 3+ are not clobbered by an unregistered double-tap slot.
+	if fired {
+		a.tapCount = 0
 	}
 }

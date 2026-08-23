@@ -13,6 +13,15 @@ import (
 	"aqwabor/input"
 )
 
+// Pin our key/button encodings to gogpu. If gogpu inserts, removes or reorders
+// a key, these compile-time assertions fail instead of silently shifting every
+// binding by a constant offset.
+const (
+	_ = uint(input.KeyUnknown) - uint(gogpuinput.KeyUnknown)
+	_ = uint(input.KeyCount) - uint(gogpuinput.KeyCount)
+	_ = uint(input.MouseButtonCount) - uint(gogpuinput.MouseButtonCount)
+)
+
 // Backend is an input.Backend backed by a running *gogpu.App.
 type Backend struct {
 	app *gogpu.App
