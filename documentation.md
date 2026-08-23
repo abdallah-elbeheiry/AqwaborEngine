@@ -7,7 +7,11 @@ aqwabor/
 ├── go.mod                 — module aqwabor, go 1.26, CGO_ENABLED=0
 ├── .gitignore
 ├── main.go                — demo
-├── loop.go                — single-threaded fixed-tick loop
+├── schedulers/
+│   ├── scheduler.go       — multi-rate scheduler (NEW)
+│   ├── parallel.go        — Future / ParallelFor / AwaitAll
+│   ├── scheduler_test.go
+│   └── parallel_test.go
 ├── window.go              — goGPU auto window + colored vertices
 └── shaders/
     ├── vertex.wgsl        — vertex shader (vs_main)
@@ -19,39 +23,88 @@ Build: `CGO_ENABLED=0 go run .`
 
 ---
 
-## Loop (`schedulers/loop.go`)
+## Scheduler (`schedulers/scheduler.go`)
 
-Single-threaded, deterministic. One goroutine ticks, tasks run in order every tick. No steps are skipped — if overloaded it lags but stays correct.
+**Multi-rate, fixed-timestep scheduler.** Register systems at different Hz; a single background goroutine drives all rates. Speed multiplier scales how often all registered functions run per wall-clock second.
 
 ```go
-loop := NewLoop(60) // Hz
-loop.Start()
-defer loop.Stop()
+s := schedulers.NewScheduler()
 
-loop.Do(func(){})                // every tick
-loop.Once(func(){})              // once
-loop.Every(100*time.Millisecond, fn)
-loop.Times(10, fn)
-loop.After(time.Second, fn)
-loop.AfterTicks(5, fn)
+// Register systems at their desired tick rates
+s.Run(UpdateSupply, 2.0)       // 2 Hz
+s.Run(UpdateCombat, 2.0)       
+s.Run(UpdateAI, 1.0)           
+s.Run(UpdateProduction, 0.5)   // 0.5 Hz = every 2 seconds
 
-// advanced options via CreateTask:
-t := CreateTask(fn, Once())
-t = CreateTask(fn, Every(d), Until(func()bool{return done}), FinishAfter(d))
-t.Cancel()
-t.IsDone()
+// Lifecycle
+s.Start()
+s.Pause()
+s.Resume()
+s.Stop()
 
-g := loop.Serial() // ordered pipeline, runs before Do tasks each tick
-g.Do(fn); g.Once(fn); g.Every(d, fn); g.Times(n, fn); g.After(d, fn); g.AfterTicks(n, fn)
-
-loop.Alpha()      // [0,1] interpolation to next tick
-loop.TickCount()  // ticks executed
-loop.Delta()      // 1/Hz
-loop.Lag()        // behind real time
-loop.AchievedHz() // avg Hz since Start
+// Global speed (applies to ALL registered functions)
+s.SetSpeed(1.0)  // normal
+s.SetSpeed(3.0)  // 3× as often
+s.SetSpeed(0.0)  // paused (same as Pause())
 ```
 
-`Add` and all schedulers are safe from any goroutine; tasks added inside a task run next tick. `Serial()` groups run in creation order each tick.
+### Key Behavior
+
+| Property           | Behavior                                                                             |
+|--------------------|--------------------------------------------------------------------------------------|
+| **Multiple rates** | Each distinct Hz gets its own internal accumulator; functions grouped by rate        |
+| **Fixed Δt**       | `TickState.DeltaTime` = `1/hz` — constant regardless of speed                        |
+| **Speed**          | Multiplies simulation time; at 3× speed, 60 Hz functions execute ~180 times/sec      |
+| **Pause/Stop**     | `Pause()` / `SetSpeed(0)` = no functions called; `Stop()` = goroutine exits entirely |
+
+### ⚠️ Stop() stops the WHOLE scheduler
+
+`Stop()` terminates the background goroutine. **All registered functions stop.** If you need independent lifecycles (e.g., pause combat but keep AI running), use **multiple schedulers**:
+
+```go
+combat := schedulers.NewScheduler()
+combat.Run(UpdateCombat, 60.0)
+
+ai := schedulers.NewScheduler()  
+ai.Run(UpdateAI, 10.0)
+
+combat.Start()
+ai.Start()
+
+// later: stop only combat
+combat.Stop()  // AI keeps running
+```
+
+### TickState
+
+Passed by value to every registered function:
+
+```go
+type TickState struct {
+    Tick      uint64   // monotonically increasing per-rate tick count
+    DeltaTime float64  // fixed = 1/hz (seconds)
+}
+```
+
+---
+
+## Parallel Utilities (`schedulers/parallel.go`)
+
+Run work concurrently inside your tick functions. Fully awaited before function returns.
+
+```go
+// Future — async value
+f := Go(func() int { return heavy() })
+val := f.Get() // blocks until ready
+
+// ParallelFor — data-parallel loop
+ParallelFor(len(items), func(i int) {
+    process(items[i])
+})
+
+// AwaitAll — wait on multiple futures
+AwaitAll(f1, f2, f3)
+```
 
 ---
 
@@ -96,14 +149,9 @@ Pipeline: vertex `pos@0 vec2` + `color@1 vec4`, stride 24, `TriangleList`, `vs_m
 
 ---
 
-## Demo (`main.go`)
-
-1. `measure()` — 240Hz loop, 64 tasks, 5s, prints `achieved Hz` + `lag`.
-2. `runWindowDemo()` — 60Hz loop + goGPU window drawing a colored quad.
-
 ## Notes
 
-- No `internal/` — `Loop`, `Task`, `Vertex`, `Window` are in `package main` directly.
-- Single file per concern: `schedulers/loop.go` (≈490 lines), `window.go` (≈320 lines with embedded shaders), `main.go` (≈90 lines), `shaders/*.wgsl` independent.
+- No `internal/` — `Scheduler`, `Vertex`, `Window` are exported directly.
+- Single file per concern: `schedulers/scheduler.go` (≈160 lines), `schedulers/parallel.go` (≈70 lines), `window.go` (≈320 lines with embedded shaders), `main.go` (≈40 lines), `shaders/*.wgsl` independent.
 - `.gitignore` covers binaries (`AqwaborEngine`, `*.test`, `*.out`), `vendor/`, `.idea/`, `.vscode/`, `.DS_Store`, `/tmp/`.
 - Pure Go, `CGO_ENABLED=0`, `go 1.26`.
