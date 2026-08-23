@@ -8,7 +8,7 @@ package headless
 import (
 	"sync"
 
-	"aqwabor/input"
+	"github.com/abdallah-elbeheiry/AqwaborEngine/input"
 )
 
 // Backend is an input.Backend whose events are injected programmatically.

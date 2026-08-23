@@ -3,8 +3,8 @@ package examples
 import (
 	"fmt"
 
-	"aqwabor/input"
-	"aqwabor/input/backend/headless"
+	"github.com/abdallah-elbeheiry/AqwaborEngine/input"
+	"github.com/abdallah-elbeheiry/AqwaborEngine/input/backend/headless"
 )
 
 // Example_press demonstrates a basic press/release Action.

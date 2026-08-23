@@ -1,4 +1,4 @@
-package aqwabor
+package window
 
 import (
 	_ "embed"

@@ -10,7 +10,7 @@ import (
 	"github.com/gogpu/gogpu"
 	gogpuinput "github.com/gogpu/gogpu/input"
 
-	"aqwabor/input"
+	"github.com/abdallah-elbeheiry/AqwaborEngine/input"
 )
 
 // Pin our key/button encodings to gogpu. If gogpu inserts, removes or reorders

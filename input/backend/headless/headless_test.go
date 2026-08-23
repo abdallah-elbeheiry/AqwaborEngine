@@ -3,7 +3,7 @@ package headless
 import (
 	"testing"
 
-	"aqwabor/input"
+	"github.com/abdallah-elbeheiry/AqwaborEngine/input"
 )
 
 func TestHeadlessInjectsAndPolls(t *testing.T) {

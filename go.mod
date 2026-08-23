@@ -1,4 +1,4 @@
-module aqwabor
+module github.com/abdallah-elbeheiry/AqwaborEngine
 
 go 1.26
 

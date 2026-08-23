@@ -3,8 +3,8 @@ package main
 import (
 	"log"
 
-	"aqwabor"
-	"aqwabor/schedulers"
+	"github.com/abdallah-elbeheiry/AqwaborEngine/schedulers"
+	"github.com/abdallah-elbeheiry/AqwaborEngine/window"
 
 	"github.com/gogpu/gogpu"
 )
@@ -14,7 +14,7 @@ func main() {
 }
 
 func runWindowDemo() {
-	win, err := aqwabor.NewWindow(aqwabor.WindowConfig{
+	win, err := window.NewWindow(window.WindowConfig{
 		Title:     "Aqwabor Engine - goGPU Auto",
 		W:         1280,
 		H:         720,
@@ -30,7 +30,7 @@ func runWindowDemo() {
 	s.Start()
 	defer s.Stop()
 
-	quad := []aqwabor.Vertex{
+	quad := []window.Vertex{
 		{X: -0.5, Y: -0.5, R: 1.0, G: 0.0, B: 0.0, A: 1},
 		{X: 0.5, Y: -0.5, R: 0.0, G: 1.0, B: 0.0, A: 1},
 		{X: 0.5, Y: 0.5, R: 0.0, G: 0.0, B: 1.0, A: 1},
