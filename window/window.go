@@ -5,10 +5,14 @@ import (
 	"math"
 	"sync"
 
+	"github.com/abdallah-elbeheiry/AqwaborEngine/logx"
 	"github.com/gogpu/gogpu"
 	"github.com/gogpu/gputypes"
 	"github.com/gogpu/wgpu"
 )
+
+// log is the window subsystem logger, pre-tagged with its component.
+var log = logx.With("component", "window")
 
 //go:embed shaders/vertex.wgsl
 var vertexWGSL string
@@ -43,6 +47,7 @@ type Window struct {
 
 func NewWindow(cfg WindowConfig) (*Window, error) {
 	if cfg.W <= 0 || cfg.H <= 0 {
+		log.Warn("invalid size, falling back to default", "w", cfg.W, "h", cfg.H)
 		cfg.W = 1280
 		cfg.H = 720
 	}
@@ -53,6 +58,7 @@ func NewWindow(cfg WindowConfig) (*Window, error) {
 		WithTitle(cfg.Title).
 		WithSize(cfg.W, cfg.H).
 		WithResizable(cfg.Resizable))
+	log.Info("window created", "title", cfg.Title, "w", cfg.W, "h", cfg.H, "resizable", cfg.Resizable)
 	return &Window{app: app, cfg: cfg}, nil
 }
 
@@ -66,36 +72,51 @@ func (w *Window) Run(onDraw func(dc *gogpu.Context)) error {
 		w.mu.Lock()
 		w.frameCleared = false
 		w.mu.Unlock()
+		log.Debug("frame begin")
 		onDraw(dc)
+		log.Debug("frame end")
 	}
 	w.app.OnDraw(wrapped)
-	return w.app.Run()
+	log.Info("window run loop starting")
+	err := w.app.Run()
+	if err != nil {
+		log.Errorf("window run loop exited with error: %v", err)
+	} else {
+		log.Info("window run loop exited cleanly")
+	}
+	return err
 }
 
 func (w *Window) Close() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	released := 0
 	for _, b := range w.pendingBufs {
 		if b != nil {
 			b.Release()
+			released++
 		}
 	}
 	w.pendingBufs = nil
+	log.Info("window closed", "buffers_released", released)
 }
 
 func (w *Window) retainBuffer(b *wgpu.Buffer) {
 	w.mu.Lock()
 	w.pendingBufs = append(w.pendingBufs, b)
-	if len(w.pendingBufs) > 8 {
+	total := len(w.pendingBufs)
+	if total > 8 {
 		toRelease := w.pendingBufs[0]
 		w.pendingBufs = w.pendingBufs[1:]
 		w.mu.Unlock()
 		if toRelease != nil {
 			toRelease.Release()
 		}
+		log.Debug("released oldest retained buffer", "live_buffers", len(w.pendingBufs))
 		return
 	}
 	w.mu.Unlock()
+	log.Debug("retained vertex buffer", "live_buffers", total)
 }
 
 func (w *Window) Draw(dc *gogpu.Context, vertices []Vertex) error {
@@ -120,8 +141,10 @@ var pipelineErr error
 
 func ensurePipeline(dev *wgpu.Device, format gputypes.TextureFormat) (*wgpu.RenderPipeline, error) {
 	if coloredPipeline != nil {
+		log.Debug("pipeline cache hit", "format", format, "cached_err", pipelineErr != nil)
 		return coloredPipeline, pipelineErr
 	}
+	log.Debug("building render pipeline", "format", format)
 	// Shaders are in independent files: shaders/vertex.wgsl and shaders/fragment.wgsl.
 	// Fall back to combined colored.wgsl if those are empty (keeps single-file compat).
 	vertSrc := vertexWGSL
@@ -133,16 +156,19 @@ func ensurePipeline(dev *wgpu.Device, format gputypes.TextureFormat) (*wgpu.Rend
 	vertMod, err := dev.CreateShaderModule(&wgpu.ShaderModuleDescriptor{Label: "aqwabor vert", WGSL: vertSrc})
 	if err != nil {
 		pipelineErr = err
+		log.Errorf("failed to create vertex shader module: %v", err)
 		return nil, err
 	}
 	fragMod, err := dev.CreateShaderModule(&wgpu.ShaderModuleDescriptor{Label: "aqwabor frag", WGSL: fragSrc})
 	if err != nil {
 		pipelineErr = err
+		log.Errorf("failed to create fragment shader module: %v", err)
 		return nil, err
 	}
 	layout, err := dev.CreatePipelineLayout(&wgpu.PipelineLayoutDescriptor{Label: "aqwabor layout"})
 	if err != nil {
 		pipelineErr = err
+		log.Errorf("failed to create pipeline layout: %v", err)
 		return nil, err
 	}
 	coloredPipeline, err = dev.CreateRenderPipeline(&wgpu.RenderPipelineDescriptor{
@@ -168,6 +194,11 @@ func ensurePipeline(dev *wgpu.Device, format gputypes.TextureFormat) (*wgpu.Rend
 		Primitive: gputypes.PrimitiveState{Topology: gputypes.PrimitiveTopologyTriangleList},
 	})
 	pipelineErr = err
+	if err != nil {
+		log.Errorf("failed to create render pipeline: %v", err)
+		return nil, err
+	}
+	log.Info("render pipeline ready", "format", format)
 	return coloredPipeline, err
 }
 
@@ -177,12 +208,14 @@ func (w *Window) drawVertices(dc *gogpu.Context, vertices []Vertex) error {
 	}
 	provider := w.app.DeviceProvider()
 	if provider == nil {
+		log.Debug("draw skipped: no device provider")
 		return nil
 	}
 	dev := provider.Device()
 	queue := provider.Queue()
 	format := provider.SurfaceFormat()
 	if dev == nil || queue == nil {
+		log.Debug("draw skipped: device or queue not ready", "has_device", dev != nil, "has_queue", queue != nil)
 		return nil
 	}
 	pipe, err := ensurePipeline(dev, format)
@@ -196,20 +229,24 @@ func (w *Window) drawVertices(dc *gogpu.Context, vertices []Vertex) error {
 		Usage: gputypes.BufferUsageVertex | gputypes.BufferUsageCopyDst,
 	})
 	if err != nil {
+		log.Errorf("failed to create vertex buffer: %v", err)
 		return err
 	}
 	w.retainBuffer(buf)
 
 	b := vertexSliceToBytes(vertices, int(size))
 	if err := queue.WriteBuffer(buf, 0, b); err != nil {
+		log.Errorf("failed to upload vertices: %v", err)
 		return err
 	}
 	enc := dc.CommandEncoder()
 	if enc == nil {
+		log.Debug("draw skipped: no command encoder")
 		return nil
 	}
 	view := dc.SurfaceView()
 	if view == nil {
+		log.Debug("draw skipped: no surface view")
 		return nil
 	}
 	w.mu.Lock()
@@ -229,11 +266,13 @@ func (w *Window) drawVertices(dc *gogpu.Context, vertices []Vertex) error {
 		}},
 	})
 	if err != nil {
+		log.Errorf("failed to begin render pass: %v", err)
 		return err
 	}
 	pass.SetPipeline(pipe)
 	pass.SetVertexBuffer(0, buf, 0)
 	pass.Draw(uint32(len(vertices)), 1, 0, 0)
+	log.Debug("draw submitted", "vertices", len(vertices), "bytes", size, "first_clear", isFirst)
 	return pass.End()
 }
 
@@ -285,8 +324,10 @@ func pointInTriangle(p, a, b, c Vertex) bool {
 func triangulate(poly []Vertex) []Vertex {
 	n := len(poly)
 	if n < 3 {
+		log.Debug("triangulate skipped: need >=3 verts", "n", n)
 		return nil
 	}
+	log.Debug("triangulating polygon", "input_verts", n)
 	verts := append([]Vertex{}, poly...)
 	if signedArea(verts) >= 0 {
 		for i, j := 0, len(verts)-1; i < j; i, j = i+1, j-1 {
@@ -329,9 +370,11 @@ func triangulate(poly []Vertex) []Vertex {
 			break
 		}
 		if !clipped {
+			log.Debug("triangulate failed: polygon not simple", "input_verts", n)
 			return nil
 		}
 	}
 	result = append(result, verts[idx[0]], verts[idx[1]], verts[idx[2]])
+	log.Debug("triangulate complete", "input_verts", n, "output_tris", len(result)/3)
 	return result
 }

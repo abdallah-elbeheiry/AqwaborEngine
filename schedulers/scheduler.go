@@ -3,7 +3,12 @@ package schedulers
 import (
 	"sync"
 	"time"
+
+	"github.com/abdallah-elbeheiry/AqwaborEngine/logx"
 )
+
+// log is the scheduler subsystem logger, pre-tagged with its component.
+var log = logx.With("component", "scheduler")
 
 type TickState struct {
 	Tick      uint64
@@ -30,6 +35,7 @@ type Scheduler struct {
 }
 
 func NewScheduler() *Scheduler {
+	log.Debug("scheduler created")
 	return &Scheduler{
 		groups: make(map[float64]*rateGroup),
 		speed:  1.0,
@@ -38,6 +44,7 @@ func NewScheduler() *Scheduler {
 
 func (s *Scheduler) Run(fn func(TickState), hz float64) {
 	if hz <= 0 {
+		log.Warn("Run ignored: non-positive hz", "hz", hz)
 		return
 	}
 	s.mu.Lock()
@@ -54,6 +61,7 @@ func (s *Scheduler) Run(fn func(TickState), hz float64) {
 		s.groups[hz] = g
 	}
 	g.fns = append(g.fns, fn)
+	log.Info("registered tick function", "hz", hz, "interval_s", g.interval, "total_fns", len(g.fns))
 }
 
 func (s *Scheduler) Start() {
@@ -67,6 +75,14 @@ func (s *Scheduler) Start() {
 	s.stopCh = make(chan struct{})
 	s.doneCh = make(chan struct{})
 	s.mu.Unlock()
+
+	rates := make([]float64, 0, len(s.groups))
+	s.mu.Lock()
+	for hz := range s.groups {
+		rates = append(rates, hz)
+	}
+	s.mu.Unlock()
+	log.Info("scheduler started", "rates", rates, "speed", s.Speed())
 
 	go s.run()
 }
@@ -82,6 +98,7 @@ func (s *Scheduler) Stop() {
 	doneCh := s.doneCh
 	s.mu.Unlock()
 
+	log.Info("scheduler stopping")
 	close(stopCh)
 	<-doneCh
 }
@@ -105,6 +122,7 @@ func (s *Scheduler) SetSpeed(speed float64) {
 	s.mu.Lock()
 	s.speed = speed
 	s.mu.Unlock()
+	log.Debug("scheduler speed changed", "speed", speed)
 }
 
 func (s *Scheduler) Speed() float64 {
@@ -150,8 +168,16 @@ func (s *Scheduler) run() {
 						Tick:      g.tick,
 						DeltaTime: g.delta,
 					}
+					log.Debug("tick firing", "hz", g.hz, "tick", g.tick, "fns", len(g.fns), "sim_dt", simDT)
 					for _, fn := range g.fns {
-						fn(state)
+						func() {
+							defer func() {
+								if r := recover(); r != nil {
+									log.Errorf("tick panicked (hz=%v tick=%d): %v", g.hz, g.tick, r)
+								}
+							}()
+							fn(state)
+						}()
 					}
 					g.tick++
 					g.accum -= g.interval

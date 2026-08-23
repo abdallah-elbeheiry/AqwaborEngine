@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/abdallah-elbeheiry/AqwaborEngine/input"
+	"github.com/abdallah-elbeheiry/AqwaborEngine/logx"
 )
 
 // Backend is an input.Backend whose events are injected programmatically.
@@ -24,6 +25,7 @@ func (b *Backend) push(e input.Event) {
 	b.mu.Lock()
 	b.queue = append(b.queue, e)
 	b.mu.Unlock()
+	logx.Debug("headless injected event", "kind", e.Kind, "key", e.Key, "button", e.Button, "x", e.X, "y", e.Y)
 }
 
 // Poll returns and clears the events injected since the last call.
@@ -32,6 +34,7 @@ func (b *Backend) Poll() []input.Event {
 	q := b.queue
 	b.queue = nil
 	b.mu.Unlock()
+	logx.Debug("headless poll", "events", len(q))
 	return q
 }
 

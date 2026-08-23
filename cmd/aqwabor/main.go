@@ -1,8 +1,9 @@
 package main
 
 import (
-	"log"
+	"os"
 
+	"github.com/abdallah-elbeheiry/AqwaborEngine/logx"
 	"github.com/abdallah-elbeheiry/AqwaborEngine/schedulers"
 	"github.com/abdallah-elbeheiry/AqwaborEngine/window"
 
@@ -10,6 +11,7 @@ import (
 )
 
 func main() {
+	logx.Init(logx.WithColor(true), logx.WithOutput(os.Stdout), logx.WithLevel(logx.DebugLevel))
 	runWindowDemo()
 }
 
@@ -21,9 +23,10 @@ func runWindowDemo() {
 		Resizable: true,
 	})
 	if err != nil {
-		log.Fatal(err)
+		logx.Fatalf("failed to create window: %v", err)
 	}
 	defer win.Close()
+	logx.Info("window ready", "title", "Aqwabor Engine - goGPU Auto", "w", 1280, "h", 720)
 
 	s := schedulers.NewScheduler()
 	s.Run(func(st schedulers.TickState) {}, 60.0)
@@ -40,9 +43,9 @@ func runWindowDemo() {
 	if err := win.Run(func(dc *gogpu.Context) {
 		dc.Clear(0.05, 0.05, 0.1, 1)
 		if err := win.DrawPolygon(dc, quad); err != nil {
-			log.Printf("draw: %v", err)
+			logx.Errorf("draw: %v", err)
 		}
 	}); err != nil {
-		log.Fatal(err)
+		logx.Fatalf("window run failed: %v", err)
 	}
 }

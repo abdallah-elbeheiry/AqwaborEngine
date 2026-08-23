@@ -18,6 +18,15 @@
 // frame from your main loop.
 package input
 
+import (
+	"fmt"
+
+	"github.com/abdallah-elbeheiry/AqwaborEngine/logx"
+)
+
+// log is the input subsystem logger, pre-tagged with its component.
+var log = logx.With("component", "input")
+
 // EventKind enumerates the kinds of raw events a Backend can emit.
 type EventKind uint8
 
@@ -136,7 +145,18 @@ func NewManager(backend Backend) *Manager {
 		keysDown: make(map[Key]bool),
 	}
 	m.ctx.mgr = m
+	log.Info("input manager created", "backend", backendName(backend))
 	return m
+}
+
+// backendName returns a short, stable identifier for the backend type.
+func backendName(b Backend) string {
+	switch b.(type) {
+	case nil:
+		return "none"
+	default:
+		return fmt.Sprintf("%T", b)
+	}
 }
 
 // Action returns the named Action, creating it on first use.
@@ -154,11 +174,13 @@ func (m *Manager) Action(name string) *Action {
 // Action fires when any of its bindings is active.
 func (m *Manager) BindKey(a *Action, k Key) {
 	a.bindings = append(a.bindings, Binding{kind: bindKey, key: k})
+	log.Debug("bound key", "action", a.name, "key", k, "bindings", len(a.bindings))
 }
 
 // BindMouseButton adds a mouse button binding to an Action.
 func (m *Manager) BindMouseButton(a *Action, b MouseButton) {
 	a.bindings = append(a.bindings, Binding{kind: bindMouse, button: b})
+	log.Debug("bound mouse button", "action", a.name, "button", b, "bindings", len(a.bindings))
 }
 
 // Combo returns (creating if needed) an Action that fires only when all the
@@ -167,6 +189,7 @@ func (m *Manager) BindMouseButton(a *Action, b MouseButton) {
 func (m *Manager) Combo(name string, keys ...Key) *Action {
 	a := m.Action(name)
 	a.bindings = append(a.bindings, Binding{kind: bindCombo, combo: keys})
+	log.Debug("bound combo", "action", name, "keys", keys)
 	return a
 }
 
@@ -174,6 +197,7 @@ func (m *Manager) Combo(name string, keys ...Key) *Action {
 // Callbacks and live state are preserved (the pressed flag is reset, so no
 // release is synthesized for a key that was physically still held).
 func (m *Manager) Rebind(a *Action, k Key) {
+	log.Debug("rebind", "action", a.name, "key", k)
 	a.Unbind()
 	m.BindKey(a, k)
 }
@@ -232,34 +256,42 @@ func (m *Manager) Update(dt float64) {
 	m.ctx.now = m.clock
 	m.ctx.dt = dt
 
+	eventCount := 0
 	if m.backend != nil {
 		for _, ev := range m.backend.Poll() {
 			m.applyEvent(ev)
+			eventCount++
 		}
 	}
 
 	for _, a := range m.actions {
 		a.process(m)
 	}
+	log.Debug("input frame", "clock", m.clock, "dt", dt, "raw_events", eventCount, "actions", len(m.actions))
 }
 
 func (m *Manager) applyEvent(ev Event) {
 	switch ev.Kind {
 	case EventKeyDown:
 		m.keysDown[ev.Key] = true
+		log.Debug("key down", "key", ev.Key)
 	case EventKeyUp:
 		m.keysDown[ev.Key] = false
+		log.Debug("key up", "key", ev.Key)
 	case EventMouseDown:
 		if ev.Button < MouseButtonCount {
 			m.mouseDown[ev.Button] = true
 		}
 		m.mouseX, m.mouseY = ev.X, ev.Y
+		log.Debug("mouse down", "button", ev.Button, "x", ev.X, "y", ev.Y)
 	case EventMouseUp:
 		if ev.Button < MouseButtonCount {
 			m.mouseDown[ev.Button] = false
 		}
 		m.mouseX, m.mouseY = ev.X, ev.Y
+		log.Debug("mouse up", "button", ev.Button, "x", ev.X, "y", ev.Y)
 	case EventMouseMove:
 		m.mouseX, m.mouseY = ev.X, ev.Y
+		log.Debug("mouse move", "x", ev.X, "y", ev.Y)
 	}
 }

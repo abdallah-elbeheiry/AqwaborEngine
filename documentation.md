@@ -6,16 +6,28 @@ Three Go files plus shaders, `package main`, no `internal/` hiding. Everything i
 aqwabor/
 ├── go.mod                 — module aqwabor, go 1.26, CGO_ENABLED=0
 ├── .gitignore
-├── main.go                — demo
+├── documentation.md
+├── cmd/aqwabor/main.go    — demo entrypoint
+├── logx/                  — thin logging wrapper over zerolog (the ONLY package that imports zerolog)
+│   ├── logx.go            — Init, package-level helpers, *Logger
+│   ├── methods.go         — level methods + key/value field helper
+│   ├── options.go         — Init options (level, output, color, caller, json, timestamp)
+│   ├── levels.go          — re-exported level constants
+│   ├── theme.go           — purple/blue console theme
+│   └── logx_test.go
 ├── schedulers/
-│   ├── scheduler.go       — multi-rate scheduler (NEW)
+│   ├── scheduler.go       — multi-rate scheduler
 │   ├── parallel.go        — Future / ParallelFor / AwaitAll
 │   ├── scheduler_test.go
 │   └── parallel_test.go
-├── window.go              — goGPU auto window + colored vertices
+├── window/window.go       — goGPU auto window + colored vertices
+├── input/                 — high-level input system
+│   ├── input.go           — Manager + Backend
+│   ├── action.go          — Action + derived events
+│   └── backend/           — gogpu + headless backends
 └── shaders/
     ├── vertex.wgsl        — vertex shader (vs_main)
-    ├── fragment.wgsl      — fragment shader (fs_main)
+    ├── fragment.wgsl       — fragment shader (fs_main)
     └── colored.wgsl       — combined fallback
 ```
 
@@ -149,9 +161,89 @@ Pipeline: vertex `pos@0 vec2` + `color@1 vec4`, stride 24, `TriangleList`, `vs_m
 
 ---
 
+## Logging (`logx`)
+
+All logging flows through the thin `logx` package. **The engine never imports
+`zerolog` directly — only `logx` does.** The API is deliberately simpler than
+raw zerolog chaining: the message is always first, fields are plain
+alternating `(string, any)` key/value pairs (no `.Str().Int().Msg()` chains),
+and there are one-line `Fatal`/`Panic` helpers.
+
+### Initialize once at startup
+
+```go
+func main() {
+    logx.Init(
+        logx.WithColor(true),                       // purple/blue console theme
+        logx.WithLevel(logx.DebugLevel),            // Debug/Info/Warn/Error/Fatal/Panic
+        logx.WithTimestamp(true),                  // RFC-ish timestamp
+        // logx.WithJSON(true),                     // structured JSON instead of console
+        // logx.WithCaller(true),                   // file:line (off by default, faster)
+        // logx.WithOutput(os.Stdout),              // redirect destination
+    )
+    runGame()
+}
+```
+
+Level / theming can also be controlled by the `AQWABOR_LOG` environment
+variable (`debug|info|warn|error|fatal|panic`), e.g. `AQWABOR_LOG=debug`.
+
+### Call sites are short
+
+```go
+logx.Info("window created", "title", cfg.Title, "w", cfg.W, "h", cfg.H)
+logx.Errorf("draw failed: %v", err)
+logx.Warn("low memory", "mb", 12)
+logx.Fatal("cannot continue")      // logs then os.Exit(1)
+```
+
+### Components: child loggers with context
+
+`logx.With` returns a `*logx.Logger` that prepends context to every line, so
+logs stay filterable by subsystem:
+
+```go
+var log = logx.With("component", "window")
+
+log.Debug("draw submitted", "vertices", n, "first_clear", isFirst)
+log.Error("failed to create render pipeline", "err", err)
+```
+
+Child loggers nest: `log.With("window", "main").Warn("slow frame", "ms", 22)`.
+
+### Available surface
+
+```go
+// package-level
+logx.Debug/Info/Warn/Error/Fatal/Panic(msg, kvs ...any)
+logx.Debugf/Infof/Warnf/Errorf/Fatalf/Panicf(format, args ...any)
+logx.With(kvs ...any) *Logger
+
+// per-logger (same set)
+l.Debug/Info/Warn/Error/Fatal/Panic(msg, kvs ...any)
+l.With(kvs ...any) *Logger
+
+// configuration
+logx.Init(opts ...Option)
+logx.SetLevel(logx.DebugLevel)   // re-exported from zerolog: Debug/Info/Warn/Error/Fatal/Panic/NoLevel/Disabled
+logx.SetOutput(io.Writer)
+logx.Discard()                   // tests
+
+// advanced escape hatch (engine code should not use it)
+l.Z() zerolog.Logger
+```
+
+Disabled levels short-circuit with near-zero cost, and structured fields are
+type-switched (string/int/bool/float/error/time.Duration/…) to avoid
+reflection on the hot path. The console theme leans purple/blue while keeping
+severity readable: blue `DEBUG` → light-blue `INFO` → purple `WARN` → red
+`ERROR`/`FATAL`/`PANIC`, with blue field names and a lavender message.
+
+---
+
 ## Notes
 
-- No `internal/` — `Scheduler`, `Vertex`, `Window` are exported directly.
-- Single file per concern: `schedulers/scheduler.go` (≈160 lines), `schedulers/parallel.go` (≈70 lines), `window.go` (≈320 lines with embedded shaders), `main.go` (≈40 lines), `shaders/*.wgsl` independent.
+- No `internal/` — `Scheduler`, `Vertex`, `Window`, `logx` are exported directly. `logx` is the only package that depends on `zerolog`; every other package imports `logx`, never `zerolog`.
+- Single file per concern: `schedulers/scheduler.go` (≈170 lines), `schedulers/parallel.go` (≈70 lines), `window/window.go` (≈360 lines with embedded shaders), `input/input.go` + `input/action.go`, `logx/*`, `cmd/aqwabor/main.go`, `shaders/*.wgsl` independent.
 - `.gitignore` covers binaries (`AqwaborEngine`, `*.test`, `*.out`), `vendor/`, `.idea/`, `.vscode/`, `.DS_Store`, `/tmp/`.
 - Pure Go, `CGO_ENABLED=0`, `go 1.26`.
