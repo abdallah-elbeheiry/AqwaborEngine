@@ -24,27 +24,41 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// std is the package-level logger used by the convenience functions.
-// cfg is its current configuration, used to re-apply settings on changes.
+// std is the single active package-level logger. All logging (package-level
+// helpers and child loggers created via With) emits through std's zerolog
+// logger, so SetLevel/Init affect every caller. std is replaced wholesale by
+// Init/SetOutput under mu; readers take a copy under RLock.
 var (
-	std *Logger
-	cfg *config
-	mu  sync.RWMutex
+	base zerolog.Logger = zerolog.New(os.Stderr).With().Timestamp().Logger().Level(zerolog.InfoLevel)
+	mu   sync.RWMutex
+
+	// lastCfg stores the most recently applied configuration so that
+	// SetOutput/SetLevel can preserve the other settings.
+	lastCfg *config = defaultConfig()
+
+	// std is the package-level context carrier (no kvs); emits via current().
+	std = &Logger{}
+
+	// fatalExitFunc is the terminal action for Fatal; overridable in tests.
+	fatalExitFunc = os.Exit
 )
 
 func init() {
+	// Route zerolog's built-in fatal exit through our (testable) hook so that
+	// Fatal terminates consistently and tests can intercept it.
+	zerolog.FatalExitFunc = func() { fatalExitFunc(1) }
+
 	mu.Lock()
-	cfg = defaultConfig()
-	applyConfig(cfg)
+	c := defaultConfig()
+	applyEnvLevel(c)
+	applyConfig(c)
 	mu.Unlock()
-	applyEnvLevel()
 }
 
-// Logger is a thin context-carrying wrapper around a zerolog.Logger.
-// Create children with logx.With or Logger.With; the child carries the extra
-// key/value context and prepends it on every emit.
+// Logger carries key/value context that is prepended on every emit. The actual
+// zerolog.Logger is shared process-wide (see current), so level changes apply
+// to every Logger.
 type Logger struct {
-	z   zerolog.Logger
 	kvs []any
 }
 
@@ -59,17 +73,21 @@ func defaultConfig() *config {
 }
 
 type config struct {
-	level      zerolog.Level
-	output     io.Writer
-	timeFormat string
-	caller     bool
-	color      bool
-	json       bool
-	hasTime    bool
+	level         zerolog.Level
+	explicitLevel bool // set when WithLevel was passed to this Init
+	output        io.Writer
+	timeFormat    string
+	caller        bool
+	color         bool
+	json          bool
+	hasTime       bool
 }
 
-// Init configures the package-level logger. Call it exactly once at process
-// startup (e.g. the first line of main). Subsequent calls reconfigure std.
+// Init configures the package-level logger. Call it at process start (e.g. the
+// first line of main). Subsequent calls reconfigure the global logger.
+//
+// Level policy: an explicit WithLevel always wins. AQWABOR_LOG is only a
+// default applied when no WithLevel was provided; otherwise it is ignored.
 func Init(opts ...Option) {
 	mu.Lock()
 	defer mu.Unlock()
@@ -78,9 +96,8 @@ func Init(opts ...Option) {
 	for _, o := range opts {
 		o(c)
 	}
-	cfg = c
+	applyEnvLevel(c)
 	applyConfig(c)
-	applyEnvLevel()
 }
 
 func applyConfig(c *config) {
@@ -91,8 +108,7 @@ func applyConfig(c *config) {
 
 	var w io.Writer
 	if c.json {
-		// Plain zerolog output is already structured JSON.
-		w = out
+		w = out // plain zerolog output is already structured JSON
 	} else {
 		cw := themedConsoleWriter(c.color, c.timeFormat)
 		cw.Out = out
@@ -104,62 +120,93 @@ func applyConfig(c *config) {
 		z = z.With().Timestamp().Logger()
 	}
 	if c.caller {
-		zerolog.CallerSkipFrameCount = 2
+		// zerolog's default skip (2) assumes one wrapper frame (direct
+		// usage). Our thin API adds two (logx.Info -> emit), so skip 4 to
+		// land on the user's call site.
+		zerolog.CallerSkipFrameCount = 4
 		z = z.With().Caller().Logger()
 	}
 	z = z.Level(c.level)
-	std = &Logger{z: z}
+
+	// Keep the process-global floor in sync so copies/defaults agree.
+	zerolog.SetGlobalLevel(c.level)
+
+	base = z
+	lastCfg = c
 }
 
-func applyEnvLevel() {
+// current returns the active base zerolog.Logger, copied safely.
+func current() zerolog.Logger {
+	mu.RLock()
+	z := base
+	mu.RUnlock()
+	return z
+}
+
+// stdLogger returns the active package logger under lock.
+func stdLogger() *Logger {
+	mu.RLock()
+	l := std
+	mu.RUnlock()
+	return l
+}
+
+// applyEnvLevel applies AQWABOR_LOG only when no explicit level was set.
+func applyEnvLevel(c *config) {
+	if c.explicitLevel {
+		return
+	}
 	if v := os.Getenv("AQWABOR_LOG"); v != "" {
 		if lvl, err := zerolog.ParseLevel(v); err == nil {
-			cfg.level = lvl
-			std.z = std.z.Level(lvl)
+			c.level = lvl
 		}
 	}
 }
 
-// SetLevel changes the global level after Init.
+// Level returns the effective global level.
+func Level() zerolog.Level { return current().GetLevel() }
+
+// SetLevel changes the global level after Init (and the zerolog global floor).
 func SetLevel(level zerolog.Level) {
 	mu.Lock()
 	defer mu.Unlock()
-	cfg.level = level
-	std.z = std.z.Level(level)
+	zerolog.SetGlobalLevel(level)
+	base = base.Level(level)
+	lastCfg.level = level
+	lastCfg.explicitLevel = true
 }
 
 // SetOutput redirects the global logger to w (e.g. a file), preserving all
-// other settings.
+// other settings (level, color, caller, json, timestamp).
 func SetOutput(w io.Writer) {
 	mu.Lock()
 	defer mu.Unlock()
-	cfg.output = w
-	applyConfig(cfg)
+	c := *lastCfg
+	c.output = w
+	applyConfig(&c)
 }
 
 // Discard routes all global logs to io.Discard. Handy in tests.
-func Discard() {
-	SetOutput(io.Discard)
-}
+func Discard() { SetOutput(io.Discard) }
 
-// With returns a child logger that carries the given key/value context.
-// The fields are prepended to every subsequent log call on the returned
-// logger, so logs stay filterable by component, window id, etc.
+// With returns a child logger that carries the given key/value context. The
+// fields are prepended to every subsequent log call on the returned logger, so
+// logs stay filterable by component, window id, etc. The child always uses the
+// current global level.
 func With(kvs ...any) *Logger {
-	mu.RLock()
-	base := std
-	mu.RUnlock()
-	return &Logger{z: base.z, kvs: append([]any{}, kvs...)}
+	merged := make([]any, 0, len(kvs))
+	merged = append(merged, kvs...)
+	return &Logger{kvs: merged}
 }
 
-// Z returns the underlying zerolog.Logger. Advanced users only; engine code
-// should never need this.
-func (l *Logger) Z() zerolog.Logger { return l.z }
+// Z returns the underlying global zerolog.Logger. Advanced users only; engine
+// code should never need this.
+func (l *Logger) Z() zerolog.Logger { return current() }
 
 // With returns a new child of this logger with additional context.
 func (l *Logger) With(kvs ...any) *Logger {
 	merged := make([]any, 0, len(l.kvs)+len(kvs))
 	merged = append(merged, l.kvs...)
 	merged = append(merged, kvs...)
-	return &Logger{z: l.z, kvs: merged}
+	return &Logger{kvs: merged}
 }

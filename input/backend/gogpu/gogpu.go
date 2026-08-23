@@ -47,12 +47,12 @@ func NewBackend(app *gogpu.App) *Backend {
 // simply returns no events).
 func (b *Backend) Poll() []input.Event {
 	if b.app == nil {
-		logx.Debug("gogpu poll: no app")
+		logx.Trace("gogpu poll: no app")
 		return nil
 	}
 	st := b.app.Input()
 	if st == nil {
-		logx.Debug("gogpu poll: no input state")
+		logx.Trace("gogpu poll: no input state")
 		return nil
 	}
 
@@ -91,6 +91,6 @@ func (b *Backend) Poll() []input.Event {
 		b.lastX, b.lastY = x, y
 		events = append(events, input.Event{Kind: input.EventMouseMove, X: float64(x), Y: float64(y)})
 	}
-	logx.Debug("gogpu poll", "events", len(events))
+	logx.Trace("gogpu poll", "events", len(events))
 	return events
 }

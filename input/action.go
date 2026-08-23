@@ -154,7 +154,7 @@ func (a *Action) process(m *Manager) {
 			if a.enabled {
 				m.ctx.action = a
 				m.record(EventTypePressed, false, 0, 0)
-				log.Debug("action pressed", "action", a.name, "toggle", a.active, "press_cbs", len(a.onPress), "toggle_cbs", len(a.onToggle))
+				log.Trace("action pressed", "action", a.name, "toggle", a.active, "press_cbs", len(a.onPress), "toggle_cbs", len(a.onToggle))
 				for _, fn := range a.onPress {
 					fn(m.ctx)
 				}
@@ -168,7 +168,7 @@ func (a *Action) process(m *Manager) {
 			if a.enabled {
 				m.ctx.action = a
 				m.record(EventTypeReleased, false, 0, 0)
-				log.Debug("action released", "action", a.name, "held_s", duration)
+				log.Trace("action released", "action", a.name, "held_s", duration)
 				for _, fn := range a.onRelease {
 					fn(m.ctx)
 				}
@@ -182,7 +182,7 @@ func (a *Action) process(m *Manager) {
 		for _, h := range a.onHold {
 			if m.clock-a.downTime >= h.threshold {
 				m.record(EventTypeHold, false, 0, 0)
-				log.Debug("action hold", "action", a.name, "threshold_s", h.threshold, "held_s", m.clock-a.downTime)
+				log.Trace("action hold", "action", a.name, "threshold_s", h.threshold, "held_s", m.clock-a.downTime)
 				h.fn(m.ctx)
 			}
 		}
@@ -193,7 +193,7 @@ func (a *Action) process(m *Manager) {
 			if dx != 0 || dy != 0 {
 				m.ctx.action = a
 				m.record(EventTypeDrag, false, dx, dy)
-				log.Debug("action drag", "action", a.name, "dx", dx, "dy", dy)
+				log.Trace("action drag", "action", a.name, "dx", dx, "dy", dy)
 				for _, fn := range a.onDrag {
 					fn(dx, dy, m.ctx)
 				}

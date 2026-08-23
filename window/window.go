@@ -47,7 +47,7 @@ type Window struct {
 
 func NewWindow(cfg WindowConfig) (*Window, error) {
 	if cfg.W <= 0 || cfg.H <= 0 {
-		log.Warn("invalid size, falling back to default", "w", cfg.W, "h", cfg.H)
+		log.Debug("invalid size, falling back to default", "w", cfg.W, "h", cfg.H)
 		cfg.W = 1280
 		cfg.H = 720
 	}
@@ -58,7 +58,7 @@ func NewWindow(cfg WindowConfig) (*Window, error) {
 		WithTitle(cfg.Title).
 		WithSize(cfg.W, cfg.H).
 		WithResizable(cfg.Resizable))
-	log.Info("window created", "title", cfg.Title, "w", cfg.W, "h", cfg.H, "resizable", cfg.Resizable)
+	log.Debug("window created", "title", cfg.Title, "w", cfg.W, "h", cfg.H, "resizable", cfg.Resizable)
 	return &Window{app: app, cfg: cfg}, nil
 }
 
@@ -72,17 +72,17 @@ func (w *Window) Run(onDraw func(dc *gogpu.Context)) error {
 		w.mu.Lock()
 		w.frameCleared = false
 		w.mu.Unlock()
-		log.Debug("frame begin")
+		log.Trace("frame begin")
 		onDraw(dc)
-		log.Debug("frame end")
+		log.Trace("frame end")
 	}
 	w.app.OnDraw(wrapped)
-	log.Info("window run loop starting")
+	log.Debug("window run loop starting")
 	err := w.app.Run()
 	if err != nil {
 		log.Errorf("window run loop exited with error: %v", err)
 	} else {
-		log.Info("window run loop exited cleanly")
+		log.Debug("window run loop exited cleanly")
 	}
 	return err
 }
@@ -98,7 +98,7 @@ func (w *Window) Close() {
 		}
 	}
 	w.pendingBufs = nil
-	log.Info("window closed", "buffers_released", released)
+	log.Debug("window closed", "buffers_released", released)
 }
 
 func (w *Window) retainBuffer(b *wgpu.Buffer) {
@@ -112,11 +112,11 @@ func (w *Window) retainBuffer(b *wgpu.Buffer) {
 		if toRelease != nil {
 			toRelease.Release()
 		}
-		log.Debug("released oldest retained buffer", "live_buffers", len(w.pendingBufs))
+		log.Trace("released oldest retained buffer", "live_buffers", len(w.pendingBufs))
 		return
 	}
 	w.mu.Unlock()
-	log.Debug("retained vertex buffer", "live_buffers", total)
+	log.Trace("retained vertex buffer", "live_buffers", total)
 }
 
 func (w *Window) Draw(dc *gogpu.Context, vertices []Vertex) error {
@@ -141,7 +141,7 @@ var pipelineErr error
 
 func ensurePipeline(dev *wgpu.Device, format gputypes.TextureFormat) (*wgpu.RenderPipeline, error) {
 	if coloredPipeline != nil {
-		log.Debug("pipeline cache hit", "format", format, "cached_err", pipelineErr != nil)
+		log.Trace("pipeline cache hit", "format", format, "cached_err", pipelineErr != nil)
 		return coloredPipeline, pipelineErr
 	}
 	log.Debug("building render pipeline", "format", format)
@@ -198,7 +198,7 @@ func ensurePipeline(dev *wgpu.Device, format gputypes.TextureFormat) (*wgpu.Rend
 		log.Errorf("failed to create render pipeline: %v", err)
 		return nil, err
 	}
-	log.Info("render pipeline ready", "format", format)
+	log.Debug("render pipeline ready", "format", format)
 	return coloredPipeline, err
 }
 
@@ -208,18 +208,22 @@ func (w *Window) drawVertices(dc *gogpu.Context, vertices []Vertex) error {
 	}
 	provider := w.app.DeviceProvider()
 	if provider == nil {
-		log.Debug("draw skipped: no device provider")
+		log.Error("draw skipped: no device provider")
 		return nil
 	}
 	dev := provider.Device()
 	queue := provider.Queue()
 	format := provider.SurfaceFormat()
 	if dev == nil || queue == nil {
-		log.Debug("draw skipped: device or queue not ready", "has_device", dev != nil, "has_queue", queue != nil)
+		log.Error("draw skipped: device or queue not ready", "has_device", dev != nil, "has_queue", queue != nil)
 		return nil
 	}
 	pipe, err := ensurePipeline(dev, format)
 	if err != nil || pipe == nil {
+		logx.Error("ensure pipeline failed",
+			"format", format.String(),
+			"err", err,
+		)
 		return err
 	}
 	size := uint64(len(vertices) * 24)
@@ -241,12 +245,12 @@ func (w *Window) drawVertices(dc *gogpu.Context, vertices []Vertex) error {
 	}
 	enc := dc.CommandEncoder()
 	if enc == nil {
-		log.Debug("draw skipped: no command encoder")
+		log.Error("draw skipped: no command encoder")
 		return nil
 	}
 	view := dc.SurfaceView()
 	if view == nil {
-		log.Debug("draw skipped: no surface view")
+		log.Error("draw skipped: no surface view")
 		return nil
 	}
 	w.mu.Lock()
@@ -272,7 +276,7 @@ func (w *Window) drawVertices(dc *gogpu.Context, vertices []Vertex) error {
 	pass.SetPipeline(pipe)
 	pass.SetVertexBuffer(0, buf, 0)
 	pass.Draw(uint32(len(vertices)), 1, 0, 0)
-	log.Debug("draw submitted", "vertices", len(vertices), "bytes", size, "first_clear", isFirst)
+	log.Trace("draw submitted", "vertices", len(vertices), "bytes", size, "first_clear", isFirst)
 	return pass.End()
 }
 
@@ -324,10 +328,10 @@ func pointInTriangle(p, a, b, c Vertex) bool {
 func triangulate(poly []Vertex) []Vertex {
 	n := len(poly)
 	if n < 3 {
-		log.Debug("triangulate skipped: need >=3 verts", "n", n)
+		log.Trace("triangulate skipped: need >=3 verts", "n", n)
 		return nil
 	}
-	log.Debug("triangulating polygon", "input_verts", n)
+	log.Trace("triangulating polygon", "input_verts", n)
 	verts := append([]Vertex{}, poly...)
 	if signedArea(verts) >= 0 {
 		for i, j := 0, len(verts)-1; i < j; i, j = i+1, j-1 {
@@ -370,11 +374,11 @@ func triangulate(poly []Vertex) []Vertex {
 			break
 		}
 		if !clipped {
-			log.Debug("triangulate failed: polygon not simple", "input_verts", n)
+			log.Error("triangulate failed: polygon not simple", "input_verts", n)
 			return nil
 		}
 	}
 	result = append(result, verts[idx[0]], verts[idx[1]], verts[idx[2]])
-	log.Debug("triangulate complete", "input_verts", n, "output_tris", len(result)/3)
+	log.Trace("triangulate complete", "input_verts", n, "output_tris", len(result)/3)
 	return result
 }

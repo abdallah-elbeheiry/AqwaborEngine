@@ -61,7 +61,7 @@ func (s *Scheduler) Run(fn func(TickState), hz float64) {
 		s.groups[hz] = g
 	}
 	g.fns = append(g.fns, fn)
-	log.Info("registered tick function", "hz", hz, "interval_s", g.interval, "total_fns", len(g.fns))
+	log.Debug("registered tick function", "hz", hz, "interval_s", g.interval, "total_fns", len(g.fns))
 }
 
 func (s *Scheduler) Start() {
@@ -82,7 +82,7 @@ func (s *Scheduler) Start() {
 		rates = append(rates, hz)
 	}
 	s.mu.Unlock()
-	log.Info("scheduler started", "rates", rates, "speed", s.Speed())
+	log.Debug("scheduler started", "rates", rates, "speed", s.Speed())
 
 	go s.run()
 }
@@ -98,7 +98,7 @@ func (s *Scheduler) Stop() {
 	doneCh := s.doneCh
 	s.mu.Unlock()
 
-	log.Info("scheduler stopping")
+	log.Debug("scheduler stopping")
 	close(stopCh)
 	<-doneCh
 }
@@ -168,7 +168,7 @@ func (s *Scheduler) run() {
 						Tick:      g.tick,
 						DeltaTime: g.delta,
 					}
-					log.Debug("tick firing", "hz", g.hz, "tick", g.tick, "fns", len(g.fns), "sim_dt", simDT)
+					log.Trace("tick firing", "hz", g.hz, "tick", g.tick, "fns", len(g.fns), "sim_dt", simDT)
 					for _, fn := range g.fns {
 						func() {
 							defer func() {

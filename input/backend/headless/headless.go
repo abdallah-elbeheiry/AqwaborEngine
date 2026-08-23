@@ -25,7 +25,7 @@ func (b *Backend) push(e input.Event) {
 	b.mu.Lock()
 	b.queue = append(b.queue, e)
 	b.mu.Unlock()
-	logx.Debug("headless injected event", "kind", e.Kind, "key", e.Key, "button", e.Button, "x", e.X, "y", e.Y)
+	logx.Trace("headless injected event", "kind", e.Kind, "key", e.Key, "button", e.Button, "x", e.X, "y", e.Y)
 }
 
 // Poll returns and clears the events injected since the last call.
@@ -34,7 +34,7 @@ func (b *Backend) Poll() []input.Event {
 	q := b.queue
 	b.queue = nil
 	b.mu.Unlock()
-	logx.Debug("headless poll", "events", len(q))
+	logx.Trace("headless poll", "events", len(q))
 	return q
 }
 

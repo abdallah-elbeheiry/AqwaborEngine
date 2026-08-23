@@ -145,7 +145,7 @@ func NewManager(backend Backend) *Manager {
 		keysDown: make(map[Key]bool),
 	}
 	m.ctx.mgr = m
-	log.Info("input manager created", "backend", backendName(backend))
+	log.Debug("input manager created", "backend", backendName(backend))
 	return m
 }
 
@@ -267,31 +267,31 @@ func (m *Manager) Update(dt float64) {
 	for _, a := range m.actions {
 		a.process(m)
 	}
-	log.Debug("input frame", "clock", m.clock, "dt", dt, "raw_events", eventCount, "actions", len(m.actions))
+	log.Trace("input frame", "clock", m.clock, "dt", dt, "raw_events", eventCount, "actions", len(m.actions))
 }
 
 func (m *Manager) applyEvent(ev Event) {
 	switch ev.Kind {
 	case EventKeyDown:
 		m.keysDown[ev.Key] = true
-		log.Debug("key down", "key", ev.Key)
+		log.Trace("key down", "key", ev.Key)
 	case EventKeyUp:
 		m.keysDown[ev.Key] = false
-		log.Debug("key up", "key", ev.Key)
+		log.Trace("key up", "key", ev.Key)
 	case EventMouseDown:
 		if ev.Button < MouseButtonCount {
 			m.mouseDown[ev.Button] = true
 		}
 		m.mouseX, m.mouseY = ev.X, ev.Y
-		log.Debug("mouse down", "button", ev.Button, "x", ev.X, "y", ev.Y)
+		log.Trace("mouse down", "button", ev.Button, "x", ev.X, "y", ev.Y)
 	case EventMouseUp:
 		if ev.Button < MouseButtonCount {
 			m.mouseDown[ev.Button] = false
 		}
 		m.mouseX, m.mouseY = ev.X, ev.Y
-		log.Debug("mouse up", "button", ev.Button, "x", ev.X, "y", ev.Y)
+		log.Trace("mouse up", "button", ev.Button, "x", ev.X, "y", ev.Y)
 	case EventMouseMove:
 		m.mouseX, m.mouseY = ev.X, ev.Y
-		log.Debug("mouse move", "x", ev.X, "y", ev.Y)
+		log.Trace("mouse move", "x", ev.X, "y", ev.Y)
 	}
 }

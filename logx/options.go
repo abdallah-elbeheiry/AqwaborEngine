@@ -10,9 +10,13 @@ import (
 // Option configures the logger created by Init.
 type Option func(*config)
 
-// WithLevel sets the minimum level that will be emitted.
+// WithLevel sets the minimum level that will be emitted. An explicit level
+// always wins over the AQWABOR_LOG environment variable.
 func WithLevel(level zerolog.Level) Option {
-	return func(c *config) { c.level = level }
+	return func(c *config) {
+		c.level = level
+		c.explicitLevel = true
+	}
 }
 
 // WithOutput sets the destination writer (defaults to os.Stderr).

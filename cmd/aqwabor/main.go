@@ -1,8 +1,6 @@
 package main
 
 import (
-	"os"
-
 	"github.com/abdallah-elbeheiry/AqwaborEngine/logx"
 	"github.com/abdallah-elbeheiry/AqwaborEngine/schedulers"
 	"github.com/abdallah-elbeheiry/AqwaborEngine/window"
@@ -11,7 +9,7 @@ import (
 )
 
 func main() {
-	logx.Init(logx.WithColor(true), logx.WithOutput(os.Stdout), logx.WithLevel(logx.DebugLevel))
+	logx.Init(logx.WithColor(true), logx.WithTimestamp(true), logx.WithLevel(logx.DebugLevel))
 	runWindowDemo()
 }
 

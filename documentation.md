@@ -175,7 +175,7 @@ and there are one-line `Fatal`/`Panic` helpers.
 func main() {
     logx.Init(
         logx.WithColor(true),                       // purple/blue console theme
-        logx.WithLevel(logx.DebugLevel),            // Debug/Info/Warn/Error/Fatal/Panic
+        logx.WithLevel(logx.DebugLevel),            // Trace/Debug/Info/Warn/Error/Fatal/Panic
         logx.WithTimestamp(true),                  // RFC-ish timestamp
         // logx.WithJSON(true),                     // structured JSON instead of console
         // logx.WithCaller(true),                   // file:line (off by default, faster)
@@ -185,8 +185,31 @@ func main() {
 }
 ```
 
-Level / theming can also be controlled by the `AQWABOR_LOG` environment
-variable (`debug|info|warn|error|fatal|panic`), e.g. `AQWABOR_LOG=debug`.
+Level policy: an explicit `logx.WithLevel(...)` passed to `Init` **always
+wins**. The `AQWABOR_LOG` environment variable (`trace|debug|info|warn|error|
+fatal|panic`) is only a *default* applied when no level option was provided;
+if you pass `WithLevel`, the env var is ignored. `SetLevel` overrides at
+runtime. Both the per-logger and the zerolog global floor are kept in sync, so
+`SetLevel`/`Init` affect every logger (including ones created via `With`).
+
+```go
+logx.Level() // effective level (zerolog.Level), handy for diagnostics
+```
+
+### Trace vs Debug (engine only)
+
+Engine-internal logging follows a strict volume policy so games built on the
+engine stay quiet by default:
+
+- **Trace** — noisiest plumbing, *off by default*. Per-tick / per-frame / per-poll bodies: scheduler tick entry, every `Draw`/`DrawPolygon` submission, buffer uploads, pipeline binds, raw input samples, `ParallelFor` chunks. Anything that scales with Hz, FPS, or input rate.
+- **Debug** — engine diagnostics, safe to leave on during development but still *not* per-frame: lifecycle (`Start`/`Stop`/window create/close), setup config (registered Hz, `SetSpeed`, effective level), and rare anomalies (recoverable draw error, fallback pipeline path, backend selection).
+- **Info+** — process milestones (`window ready`, clean shutdown) and real problems (`WARN`/`ERROR`/`FATAL`). Never reclassify these into Trace/Debug.
+
+```go
+logx.Trace("draw submitted", "vertices", n)     // scales with FPS -> Trace
+logx.Debug("scheduler started", "rates", rates) // one-shot setup -> Debug
+logx.Info("window ready", "title", t, "w", w)  // milestone -> Info
+```
 
 ### Call sites are short
 
@@ -215,25 +238,34 @@ Child loggers nest: `log.With("window", "main").Warn("slow frame", "ms", 22)`.
 
 ```go
 // package-level
-logx.Debug/Info/Warn/Error/Fatal/Panic(msg, kvs ...any)
-logx.Debugf/Infof/Warnf/Errorf/Fatalf/Panicf(format, args ...any)
+logx.Trace/Debug/Info/Warn/Error/Fatal/Panic(msg, kvs ...any)
+logx.Tracef/Debugf/Infof/Warnf/Errorf/Fatalf/Panicf(format, args ...any)
 logx.With(kvs ...any) *Logger
 
 // per-logger (same set)
-l.Debug/Info/Warn/Error/Fatal/Panic(msg, kvs ...any)
+l.Trace/Debug/Info/Warn/Error/Fatal/Panic(msg, kvs ...any)
 l.With(kvs ...any) *Logger
 
 // configuration
 logx.Init(opts ...Option)
-logx.SetLevel(logx.DebugLevel)   // re-exported from zerolog: Debug/Info/Warn/Error/Fatal/Panic/NoLevel/Disabled
-logx.SetOutput(io.Writer)
+logx.Level() zerolog.Level       // effective level
+logx.SetLevel(logx.DebugLevel)   // re-exported from zerolog: Trace/Debug/Info/Warn/Error/Fatal/Panic/NoLevel/Disabled (constants)
+logx.SetOutput(io.Writer)        // preserves level/color/caller/json
 logx.Discard()                   // tests
 
 // advanced escape hatch (engine code should not use it)
 l.Z() zerolog.Logger
 ```
 
-Disabled levels short-circuit with near-zero cost, and structured fields are
+Errors are special-cased: a field whose value is an `error` and whose key is
+`"error"` or `"err"` is emitted with zerolog's `Err()` so the console renders
+it in the error style (e.g. `logx.Error("boom", "err", err)`). `Fatal`/
+`Fatalf` always terminate the process (`os.Exit(1)`) and `Panic`/`Panicf`
+always panic — even when the level is `Disabled`, so a fatal condition can
+never be silently swallowed.
+
+Disabled levels short-circuit with near-zero cost (the `*f` helpers also skip
+`fmt.Sprintf` until the level is enabled), and structured fields are
 type-switched (string/int/bool/float/error/time.Duration/…) to avoid
 reflection on the hot path. The console theme leans purple/blue while keeping
 severity readable: blue `DEBUG` → light-blue `INFO` → purple `WARN` → red
