@@ -21,6 +21,12 @@ aqwabor/
 │   ├── scheduler_test.go
 │   └── parallel_test.go
 ├── window/window.go       — goGPU auto window + colored vertices
+├── sound/                 — audio: Context → Clip (cached asset) → Player (instance)
+│   ├── sound.go           — Context, New, Close, master volume, options
+│   ├── clip.go            — LoadAudio/LoadAudioFile, cache, Clip volume
+│   ├── player.go          — Play/PlayLoop/Stop/Pause/Resume, effective volume
+│   ├── backend.go         — gogpu/audio wiring (WAV + MP3), looping PCM source
+│   └── sound_test.go
 ├── input/                 — high-level input system
 │   ├── input.go           — Manager + Backend
 │   ├── action.go          — Action + derived events
@@ -158,6 +164,73 @@ var coloredWGSL string // combined fallback
 ```
 
 Pipeline: vertex `pos@0 vec2` + `color@1 vec4`, stride 24, `TriangleList`, `vs_main`/`fs_main` from `shaders/vertex.wgsl` + `shaders/fragment.wgsl`, created lazily per `TextureFormat`.
+
+---
+
+## Sound (`sound/`)
+
+Thin wrapper over the pure-Go `github.com/gogpu/audio` engine. Three-tier model:
+
+- **`Context`** — owns the audio device, the master volume, and the clip cache. One per app. `Close` tears down the device and invalidates every Clip/Player.
+- **`Clip`** — a cached, decoded audio asset. `LoadAudio`/`LoadAudioFile` decode on first load (not first play). A Clip is not audible by itself; play it by creating `Player`s.
+- **`Player`** — one playback instance. Multiple Players can play the same Clip concurrently (overlapping SFX); each has its own volume and can be stopped/paused/resumed.
+
+```go
+ctx, err := sound.New(
+    sound.WithSilent(false),  // null (no-output) driver when true; default null on non-Windows
+    sound.WithVolume(0.9),    // initial master volume, clamped [0,1]
+    // sound.WithSampleRate(44100),
+    // sound.WithChannels(2),
+)
+if err != nil { /* device open failed */ }
+defer ctx.Close()
+
+ctx.SetMasterVolume(0.5)      // clamped [0,1]; re-applied to active players
+_ = ctx.MasterVolume()        // 0.5
+
+clip, err := ctx.LoadAudioFile("sfx/click.wav") // or ctx.LoadAudio([]byte{...})
+if err != nil { /* unsupported format / decode failed */ }
+clip.SetVolume(0.8)           // default gain for new players
+
+p, err := clip.Play()         // one-shot
+if err != nil { /* play failed */ }
+// p, _ := clip.PlayLoop()    // loops until Stop
+
+p.SetVolume(1.0)              // instance gain, clamped [0,1]
+p.Pause()                     // err == nil (supported)
+p.Resume()
+p.Stop()                      // ends this instance only
+```
+
+### Volume rule
+
+`effective = masterVolume * clipVolume * playerVolume`, each factor clamped to `[0,1]`. A master of `0` ⇒ silence regardless of the others. Because `gogpu/audio`'s mixer has no public master control, this package folds the formula into every backend `Player`'s own volume and re-applies it whenever master/clip/player volume changes.
+
+### Formats (v1)
+
+- **WAV** — fully supported (PCM 8/16/24/32-bit and 32-bit float) via `gogpu/audio`.
+- **MP3** — supported via the pure-Go `github.com/hajimehoshi/go-mp3` decoder.
+- Anything else → `ErrUnsupportedFormat` (detected by RIFF/WAVE or ID3/MPEG-sync header, with an extension fallback for files).
+
+### Cache
+
+- `LoadAudioFile(path)` — normalised path is the key; same path ⇒ same `*Clip`.
+- `LoadAudio(data)` — SHA-256 of the bytes is the key; identical bytes ⇒ same `*Clip`.
+- Decode happens on first load so format/codec errors surface early.
+
+### Lifecycle / errors
+
+- After `Context.Close`, every Clip/Player method fails with `ErrClosed`.
+- `Close` is idempotent (safe to call twice).
+- `Pause`/`Resume` are supported by the backend and return `nil`; `ErrNotSupported` is defined for forward compatibility.
+
+### Logging policy (`component=sound`)
+
+All sound logs carry `component=sound`. They are detailed by design (enable with
+`logx.WithLevel(logx.DebugLevel)`; the engine default is `Info`, which hides them).
+
+- **Debug** — context open/close (sample rate, channels, master, silent flag); clip loaded (id, format, sample rate, channels, duration, bytes, cache hit/miss); master-volume and clip-volume changes (with affected player counts); and **each** Play/Stop/Pause/Resume (player id, clip id, loop flag, effective volume). No per-buffer / per-mix noise.
+- **Error** — device open failed, decode failed, play failed, read-file failed.
 
 ---
 

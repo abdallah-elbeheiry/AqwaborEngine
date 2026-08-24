@@ -1,15 +1,38 @@
 package main
 
 import (
+	_ "embed"
+
 	"github.com/abdallah-elbeheiry/AqwaborEngine/logx"
 	"github.com/abdallah-elbeheiry/AqwaborEngine/schedulers"
+	"github.com/abdallah-elbeheiry/AqwaborEngine/sound"
 	"github.com/abdallah-elbeheiry/AqwaborEngine/window"
 
 	"github.com/gogpu/gogpu"
 )
 
 func main() {
-	logx.Init(logx.WithColor(true), logx.WithTimestamp(true), logx.WithLevel(logx.DebugLevel))
+	logx.Init(logx.WithColor(true), logx.WithTimestamp(true), logx.WithLevel(logx.TraceLevel))
+
+	// Open the audio context once and keep it alive for the whole program so the
+	// song keeps playing while the window demo runs. Closing it early (e.g. right
+	// after Play) would silence the output before any audio is heard.
+	snd, err := sound.New(sound.WithVolume(0.5))
+	if err != nil {
+		logx.Errorf("sound init (no audio device?): %v", err)
+	} else {
+		defer snd.Close()
+		clip, err := snd.LoadAudioFile("examples/song-example.mp3")
+		clip.SetVolume(1)
+		if err != nil {
+			logx.Errorf("sound load: %v", err)
+		} else if p, err := clip.PlayLoop(); err != nil {
+			logx.Errorf("sound play: %v", err)
+		} else {
+			logx.Info("playing song-example.mp3", "playerVolume", p.Volume(), "master", snd.MasterVolume())
+		}
+	}
+
 	runWindowDemo()
 }
 
@@ -27,7 +50,7 @@ func runWindowDemo() {
 	logx.Info("window ready", "title", "Aqwabor Engine - goGPU Auto", "w", 1280, "h", 720)
 
 	s := schedulers.NewScheduler()
-	s.Run(func(st schedulers.TickState) {}, 60.0)
+	s.Run(func(st schedulers.TickState) {}, 2.0)
 	s.Start()
 	defer s.Stop()
 
