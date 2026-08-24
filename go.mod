@@ -4,11 +4,19 @@ go 1.26
 
 require (
 	github.com/ebitengine/oto/v3 v3.4.1
+	github.com/gogpu/gg v0.52.3
 	github.com/gogpu/gogpu v0.53.0
 	github.com/gogpu/gputypes v0.5.2
+	github.com/gogpu/ui v0.1.54
 	github.com/gogpu/wgpu v0.31.4
 	github.com/hajimehoshi/go-mp3 v0.3.4
 	github.com/rs/zerolog v1.35.1
+)
+
+require (
+	github.com/coregx/signals v0.1.1 // indirect
+	golang.org/x/image v0.45.0 // indirect
+	golang.org/x/text v0.41.0 // indirect
 )
 
 require (

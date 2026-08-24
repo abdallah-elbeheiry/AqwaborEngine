@@ -1,11 +1,12 @@
 package main
 
 import (
-	_ "embed"
+	"flag"
 
 	"github.com/abdallah-elbeheiry/AqwaborEngine/logx"
 	"github.com/abdallah-elbeheiry/AqwaborEngine/schedulers"
 	"github.com/abdallah-elbeheiry/AqwaborEngine/sound"
+	"github.com/abdallah-elbeheiry/AqwaborEngine/ui"
 	"github.com/abdallah-elbeheiry/AqwaborEngine/window"
 
 	"github.com/gogpu/gogpu"
@@ -15,7 +16,7 @@ func main() {
 	logx.Init(logx.WithColor(true), logx.WithTimestamp(true), logx.WithLevel(logx.TraceLevel))
 
 	// Open the audio context once and keep it alive for the whole program so the
-	// song keeps playing while the window demo runs. Closing it early (e.g. right
+	// song keeps playing while the demo runs. Closing it early (e.g. right
 	// after Play) would silence the output before any audio is heard.
 	snd, err := sound.New(sound.WithVolume(0.5))
 	if err != nil {
@@ -33,7 +34,60 @@ func main() {
 		}
 	}
 
-	runWindowDemo()
+	mode := flag.String("mode", "ui", "demo mode: ui (widget shell) or window (raw vertices)")
+	flag.Parse()
+
+	switch *mode {
+	case "window":
+		runWindowDemo()
+	default:
+		runUIDemo()
+	}
+}
+
+func runUIDemo() {
+	app, err := ui.New(ui.Config{
+		Title:     "Aqwabor",
+		W:         1280,
+		H:         720,
+		Resizable: true,
+		Theme:     ui.LightPurple,
+	})
+	if err != nil {
+		logx.Fatalf("ui: %v", err)
+	}
+	defer app.Close()
+
+	s := schedulers.NewScheduler()
+	s.Run(func(st schedulers.TickState) {}, 2.0)
+	s.Start()
+	defer s.Stop()
+
+	themes := []*ui.Theme{
+		ui.LightPurple, ui.DarkPurple, ui.Light, ui.Dark, ui.LightBlue, ui.DarkBlue,
+	}
+	idx := 0
+
+	// build rebuilds the root so captured colors (surface, button) follow the
+	// active theme when we switch it at runtime.
+	var build func()
+	build = func() {
+		app.SetRoot(ui.Align(ui.Column(
+			ui.CenterText(ui.Label("Aqwabor Engine").FontSize(28).Bold()),
+			ui.CenterText(ui.Label("UI layer over gogpu/ui")),
+			app.Button("Ping", func() { logx.Info("ping") }),
+			app.Button("Cycle Theme", func() {
+				idx = (idx + 1) % len(themes)
+				app.SetTheme(themes[idx])
+				build()
+			}),
+		).Padding(24).Gap(12).Background(ui.SurfaceColor(app.Theme())), ui.CrossCenter))
+	}
+	build()
+
+	if err := app.Run(); err != nil {
+		logx.Fatalf("ui run: %v", err)
+	}
 }
 
 func runWindowDemo() {
