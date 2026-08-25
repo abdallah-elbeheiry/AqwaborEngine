@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/gogpu/ui/theme"
+	"github.com/gogpu/ui/uitest"
 	"github.com/gogpu/ui/widget"
 )
 
@@ -70,4 +71,66 @@ func colorsClose(a, b widget.Color) bool {
 		math.Abs(float64(a.G-b.G)) < 1e-3 &&
 		math.Abs(float64(a.B-b.B)) < 1e-3 &&
 		math.Abs(float64(a.A-b.A)) < 1e-3
+}
+
+// TestFoxPNG exercises the real asset pipeline against the project's bundled
+// examples/fox.png (a 1024x1024 PNG): load through the app's image manager,
+// verify dimensions/caching, compose it into the standard layout widgets, and
+// confirm explicit release succeeds once the widgets are removed.
+func TestFoxPNG(t *testing.T) {
+	const foxPath = "../examples/fox.png"
+
+	app, err := New(Config{Title: "fox", W: 100, H: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fox, err := app.Images().Load(foxPath)
+	if err != nil {
+		t.Fatalf("Load(%s): %v", foxPath, err)
+	}
+	if fox == nil {
+		t.Fatal("nil asset")
+	}
+	if w, h := fox.Size(); w != 1024 || h != 1024 {
+		t.Errorf("fox size = %dx%d, want 1024x1024", w, h)
+	}
+	if fox.Users() != 0 {
+		t.Errorf("fresh asset users = %d, want 0", fox.Users())
+	}
+
+	// Repeated loads return the same canonical asset (no re-decode / dup resource).
+	if again, err := app.Images().Load(foxPath); err != nil || again != fox {
+		t.Fatalf("repeated Load must return the same asset (err=%v, same=%v)", err, again == fox)
+	}
+
+	// Compose the loaded image into the standard layout widgets.
+	compose := Column(
+		Image(fox).Size(200, 200).Fit(Contain),
+		Row(Image(fox).Size(48, 48), Label("Fox")),
+		Box(Image(fox).Size(64, 64)),
+		Clickable(Image(fox).Size(32, 32), func() {}),
+	)
+	uitest.LayoutWidget(compose, 800, 600)
+	canvas := uitest.DrawWidgetWithContext(compose, uitest.NewMockContext())
+	if len(canvas.Images) == 0 {
+		t.Fatal("expected fox.png to be drawn at least once")
+	}
+
+	// An in-tree widget holds an active user; release is refused until removed.
+	foxWidget := Image(fox)
+	foxWidget.Mount(uitest.NewMockContext())
+	if fox.Users() != 1 {
+		t.Fatalf("mounted widget users = %d, want 1", fox.Users())
+	}
+	if app.Images().TryRelease(fox) {
+		t.Fatal("TryRelease must refuse while the widget is live")
+	}
+	foxWidget.Unmount()
+	if fox.Users() != 0 {
+		t.Fatalf("after unmount users = %d, want 0", fox.Users())
+	}
+	if !app.Images().TryRelease(fox) {
+		t.Fatal("TryRelease must succeed after the widget is removed")
+	}
 }

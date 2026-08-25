@@ -43,6 +43,7 @@ type App struct {
 	uiApp    *uiapp.App
 	theme    *Theme
 	content  Widget
+	images   *ImageManager
 }
 
 // New creates a UI application. It builds a goGPU app window and the matching
@@ -142,4 +143,14 @@ func (a *App) Theme() *Theme {
 // core/button (which hardcodes grey/black), this reflects the chosen theme.
 func (a *App) Button(text string, onClick func()) Widget {
 	return newThemedButton(text, onClick, a.theme)
+}
+
+// Images returns the app's image manager. The same manager is returned on every
+// call, so assets loaded through it are shared across the whole application and
+// released through TryRelease / ForceRelease.
+func (a *App) Images() *ImageManager {
+	if a.images == nil {
+		a.images = NewImageManager()
+	}
+	return a.images
 }

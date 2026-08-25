@@ -63,6 +63,16 @@ func runUIDemo() {
 	s.Start()
 	defer s.Stop()
 
+	// Load the project's bundled fox.png through the app's image manager. Assets
+	// are loaded explicitly (no hidden I/O in widgets) and one asset can be
+	// reused by many widgets.
+	var fox *ui.ImageAsset
+	if foxAsset, err := app.Images().Load("examples/fox.png"); err != nil {
+		logx.Warnf("image load (examples/fox.png): %v", err)
+	} else {
+		fox = foxAsset
+	}
+
 	themes := []*ui.Theme{
 		ui.LightPurple, ui.DarkPurple, ui.Light, ui.Dark, ui.LightBlue, ui.DarkBlue,
 	}
@@ -72,7 +82,7 @@ func runUIDemo() {
 	// active theme when we switch it at runtime.
 	var build func()
 	build = func() {
-		app.SetRoot(ui.Align(ui.Column(
+		children := []ui.Widget{
 			ui.CenterText(ui.Label("Aqwabor Engine").FontSize(28).Bold()),
 			ui.CenterText(ui.Label("UI layer over gogpu/ui")),
 			app.Button("Ping", func() { logx.Info("ping") }),
@@ -81,12 +91,28 @@ func runUIDemo() {
 				app.SetTheme(themes[idx])
 				build()
 			}),
-		).Padding(24).Gap(12).Background(ui.SurfaceColor(app.Theme())), ui.CrossCenter))
+		}
+		// A single image button under Cycle Theme. Clickable via ImageButton.
+		if fox != nil {
+			children = append(children,
+				ui.ImageButton(fox, func() { logx.Info("fox image clicked") }),
+			)
+		}
+		app.SetRoot(ui.Align(ui.Column(children...).
+			Padding(24).Gap(12).Background(ui.SurfaceColor(app.Theme())), ui.CrossCenter))
 	}
 	build()
 
 	if err := app.Run(); err != nil {
 		logx.Fatalf("ui run: %v", err)
+	}
+
+	// After Run returns the widgets are gone, so releasing the asset now
+	// succeeds. ForceRelease is intentionally not used here.
+	if fox != nil {
+		if ok := app.Images().TryRelease(fox); !ok {
+			logx.Warn("fox asset still in use at shutdown")
+		}
 	}
 }
 
