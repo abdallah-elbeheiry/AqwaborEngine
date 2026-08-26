@@ -52,7 +52,6 @@ func LoadJSON(path string) (*World, error) {
 	}
 	return LoadJSONBytes(data)
 }
-AqwaborEngine/
 func LoadJSONBytes(data []byte) (*World, error) {
 	var wire WireWorld
 	if err := json.Unmarshal(data, &wire); err != nil {
