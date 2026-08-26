@@ -151,7 +151,7 @@ func (w *imageWidget) Draw(_ widget.Context, canvas widget.Canvas) {
 	if w.asset == nil {
 		return
 	}
-	img, ok := w.asset.take()
+	img, ok := w.asset.Take()
 	if !ok || img == nil {
 		return
 	}
@@ -176,7 +176,7 @@ func (w *imageWidget) Children() []widget.Widget { return nil }
 // widget.Lifecycle. Called by the toolkit when the widget enters the tree.
 func (w *imageWidget) Mount(_ widget.Context) {
 	if w.asset != nil {
-		w.asset.acquire()
+		w.asset.Acquire()
 	}
 }
 
@@ -184,7 +184,7 @@ func (w *imageWidget) Mount(_ widget.Context) {
 // users remain. Implements widget.Lifecycle.
 func (w *imageWidget) Unmount() {
 	if w.asset != nil {
-		w.asset.releaseUser()
+		w.asset.ReleaseUser()
 	}
 }
 
@@ -237,10 +237,7 @@ func (w *imageWidget) derive(src image.Image, bw, bh int) image.Image {
 }
 
 func clampDim(v float64) int {
-	d := int(v + 0.5)
-	if d < 1 {
-		d = 1
-	}
+	d := max(int(v+0.5), 1)
 	return d
 }
 

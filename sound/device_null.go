@@ -31,10 +31,7 @@ func newNullDevice(sr, ch int, pull pullFunc) *nullDevice {
 func (d *nullDevice) loop() {
 	defer close(d.done)
 	// ~100ms block at the device sample rate.
-	block := d.sr * d.ch / 10
-	if block < 1 {
-		block = 1
-	}
+	block := max(d.sr*d.ch/10, 1)
 	buf := make([]float32, block)
 	for {
 		select {

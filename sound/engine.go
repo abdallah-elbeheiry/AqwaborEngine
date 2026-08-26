@@ -97,7 +97,7 @@ func (v *voice) readSamples(dst []float32) int {
 
 	n, err := io.ReadFull(src, v.rbuf[:need])
 	samples := n / 4
-	for i := 0; i < samples; i++ {
+	for i := range samples {
 		bits := binary.LittleEndian.Uint32(v.rbuf[i*4:])
 		dst[i] = math.Float32frombits(bits)
 	}
@@ -191,7 +191,7 @@ func (m *mixer) Mix(out []float32) {
 
 		scratch := m.scratch[:len(out)]
 		n := v.readSamples(scratch)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			out[i] += scratch[i] * vol
 		}
 		if !finished {

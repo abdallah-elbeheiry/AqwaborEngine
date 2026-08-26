@@ -20,8 +20,8 @@ func tempPNG(t *testing.T, name string, w, h int) string {
 	dir := t.TempDir()
 	p := filepath.Join(dir, name)
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
+	for y := range h {
+		for x := range w {
 			img.Set(x, y, color.RGBA{R: uint8(x * 8), G: uint8(y * 4), B: 120, A: 255})
 		}
 	}
@@ -436,7 +436,7 @@ func TestMountUnmountReleaseStress(t *testing.T) {
 	mgr := NewImageManager()
 	p := tempPNG(t, "s.png", 8, 8)
 	const N = 300
-	for i := 0; i < N; i++ {
+	for i := range N {
 		a, err := mgr.Load(p)
 		if err != nil {
 			t.Fatalf("iter %d Load: %v", i, err)

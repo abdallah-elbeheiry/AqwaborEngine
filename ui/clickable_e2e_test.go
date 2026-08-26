@@ -36,8 +36,8 @@ func loadTestImage(t *testing.T) *ImageAsset {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "px.png")
 	img := image.NewRGBA(image.Rect(0, 0, 50, 50))
-	for y := 0; y < 50; y++ {
-		for x := 0; x < 50; x++ {
+	for y := range 50 {
+		for x := range 50 {
 			img.Set(x, y, color.RGBA{200, 30, 30, 255})
 		}
 	}

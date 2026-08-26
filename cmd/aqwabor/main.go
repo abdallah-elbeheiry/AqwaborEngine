@@ -2,22 +2,30 @@ package main
 
 import (
 	"flag"
+	"fmt"
+	"image"
+	"image/color"
+	"image/png"
+	"os"
+	"path/filepath"
+	"sync"
 
 	"github.com/abdallah-elbeheiry/AqwaborEngine/logx"
+	"github.com/abdallah-elbeheiry/AqwaborEngine/render"
 	"github.com/abdallah-elbeheiry/AqwaborEngine/schedulers"
 	"github.com/abdallah-elbeheiry/AqwaborEngine/sound"
 	"github.com/abdallah-elbeheiry/AqwaborEngine/ui"
 	"github.com/abdallah-elbeheiry/AqwaborEngine/window"
 
 	"github.com/gogpu/gogpu"
+	"github.com/gogpu/ui/geometry"
 )
 
 func main() {
 	logx.Init(logx.WithColor(true), logx.WithTimestamp(true), logx.WithLevel(logx.TraceLevel))
 
 	// Open the audio context once and keep it alive for the whole program so the
-	// song keeps playing while the demo runs. Closing it early (e.g. right
-	// after Play) would silence the output before any audio is heard.
+	// song keeps playing while the demo runs.
 	snd, err := sound.New(sound.WithVolume(0.5))
 	if err != nil {
 		logx.Errorf("sound init (no audio device?): %v", err)
@@ -34,16 +42,227 @@ func main() {
 		}
 	}
 
-	mode := flag.String("mode", "ui", "demo mode: ui (widget shell) or window (raw vertices)")
+	mode := flag.String("mode", "ui", "demo mode: ui (widget shell), window (raw vertices), map (MapView + Camera)")
 	flag.Parse()
 
 	switch *mode {
 	case "window":
 		runWindowDemo()
+	case "map":
+		runMapDemo()
 	default:
 		runUIDemo()
 	}
 }
+
+// ---------------------------------------------------------------------------
+// MapView + Camera test harness
+//
+// Exercises every feature of the map widget:
+//   - initial overview (whole map centered on first layout)
+//   - left-drag panning (gesture DragRecognizer)
+//   - mouse-wheel zoom, toward the cursor (ZoomAt)
+//   - bounds clamping (drag past the edge keeps the map in view)
+//   - world<->local coordinate conversion (live cursor HUD)
+//   - ZoomRange limits
+//   - Row composition with a side panel of live controls
+// ---------------------------------------------------------------------------
+
+var (
+	demoThemes   = []*ui.Theme{ui.LightPurple, ui.DarkPurple, ui.Light, ui.Dark, ui.LightBlue, ui.DarkBlue}
+	demoThemeIdx int
+)
+
+func cycleTheme(app *ui.App) {
+	demoThemeIdx = (demoThemeIdx + 1) % len(demoThemes)
+	app.SetTheme(demoThemes[demoThemeIdx])
+}
+
+func runMapDemo() {
+	app, err := ui.New(ui.Config{
+		Title:     "Aqwabor — MapView + Camera",
+		W:         1280,
+		H:         720,
+		Resizable: true,
+		Theme:     ui.LightPurple,
+	})
+	if err != nil {
+		logx.Fatalf("ui: %v", err)
+	}
+	defer app.Close()
+
+	// Scheduler keeps the app responsive (mirrors the other demos).
+	s := schedulers.NewScheduler()
+	s.Run(func(st schedulers.TickState) {}, 2.0)
+	s.Start()
+	defer s.Stop()
+
+	// Generate a large procedural map and load it as an asset (no repo binary).
+	mapPath := filepath.Join(os.TempDir(), "aqwabor_map.png")
+	if err := genMapPNG(mapPath, 2400, 1600); err != nil {
+		logx.Fatalf("gen map: %v", err)
+	}
+	asset, err := app.Images().Load(mapPath)
+	if err != nil {
+		logx.Fatalf("load map: %v", err)
+	}
+
+	// Live cursor readout, updated by MapView.OnPointer (local + world coords).
+	var cur struct {
+		mu           sync.Mutex
+		local, world geometry.Point
+	}
+	setCur := func(l, w geometry.Point) {
+		cur.mu.Lock()
+		cur.local, cur.world = l, w
+		cur.mu.Unlock()
+	}
+
+	// The map widget under test.
+	mv := render.MapView(asset).
+		ZoomRange(0.5, 8).
+		OnPointer(setCur)
+
+	// Side panel: live HUD (via LabelFn, re-evaluated each draw) + controls.
+	panel := ui.Column(
+		ui.Label("MapView Demo").FontSize(20).Bold(),
+		ui.Label("Left-drag: pan   •   Wheel: zoom at cursor").FontSize(11),
+
+		ui.LabelFn(func() string {
+			return fmt.Sprintf("Zoom: %.2f   (limits 0.5 … 8)", mv.Camera().Zoom())
+		}),
+		ui.LabelFn(func() string {
+			c := mv.Camera().Position()
+			return fmt.Sprintf("Camera center (world): (%.0f, %.0f)", c.X, c.Y)
+		}),
+		ui.LabelFn(func() string {
+			b := mv.Bounds().Size()
+			c := mv.LocalToWorld(geometry.Pt(b.Width/2, b.Height/2))
+			return fmt.Sprintf("Viewport center -> world: (%.0f, %.0f)", c.X, c.Y)
+		}),
+		ui.LabelFn(func() string {
+			cur.mu.Lock()
+			l := cur.local
+			cur.mu.Unlock()
+			return fmt.Sprintf("Cursor local : (%.0f, %.0f)", l.X, l.Y)
+		}),
+		ui.LabelFn(func() string {
+			cur.mu.Lock()
+			w := cur.world
+			cur.mu.Unlock()
+			return fmt.Sprintf("Cursor world: (%.0f, %.0f)", w.X, w.Y)
+		}),
+
+		ui.Button("Zoom In", func() {
+			mv.Camera().SetZoom(mv.Camera().Zoom() * 1.1)
+			mv.SetNeedsRedraw(true)
+		}),
+		ui.Button("Zoom Out", func() {
+			mv.Camera().SetZoom(mv.Camera().Zoom() / 1.1)
+			mv.SetNeedsRedraw(true)
+		}),
+		ui.Button("Reset View", func() { mv.Overview() }),
+		app.Button("Cycle Theme", func() { cycleTheme(app) }),
+	).Width(300).Gap(8).Padding(12).
+		Background(ui.SurfaceColor(app.Theme())).
+		CrossAlign(ui.CrossStart)
+
+	// Compose: control panel beside the map viewport.
+	app.SetRoot(ui.Row(panel, mv))
+
+	logx.Info("map demo running: drag to pan, scroll to zoom toward cursor")
+	if err := app.Run(); err != nil {
+		logx.Fatalf("ui run: %v", err)
+	}
+
+	if ok := app.Images().TryRelease(asset); !ok {
+		logx.Warn("map asset still in use at shutdown")
+	}
+}
+
+// genMapPNG draws a 2400x1600 procedural "world" (sea, lat/long grid, a few
+// colored land regions, a center cross) and writes it as a PNG so it can be
+// loaded through the normal ImageManager path.
+func genMapPNG(path string, w, h int) error {
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+
+	sea := color.RGBA{30, 90, 140, 255}
+	for y := range h {
+		for x := range w {
+			img.Set(x, y, sea)
+		}
+	}
+
+	grid := color.RGBA{60, 130, 180, 255}
+	for x := 0; x <= w; x += 200 {
+		for xx := 0; xx < 2 && x+xx < w; xx++ {
+			for y := range h {
+				img.Set(x+xx, y, grid)
+			}
+		}
+	}
+	for y := 0; y <= h; y += 200 {
+		for yy := 0; yy < 2 && y+yy < h; yy++ {
+			for x := range w {
+				img.Set(x, y+yy, grid)
+			}
+		}
+	}
+
+	regions := []struct {
+		x, y, w, h int
+		c          color.RGBA
+	}{
+		{200, 200, 500, 400, color.RGBA{90, 160, 80, 255}},
+		{800, 150, 600, 500, color.RGBA{200, 180, 90, 255}},
+		{1500, 300, 600, 700, color.RGBA{160, 100, 160, 255}},
+		{300, 900, 700, 500, color.RGBA{200, 120, 80, 255}},
+		{1200, 1000, 800, 400, color.RGBA{80, 160, 160, 255}},
+	}
+	for _, r := range regions {
+		fillRect(img, r.x, r.y, r.w, r.h, r.c)
+		strokeRect(img, r.x, r.y, r.w, r.h, color.RGBA{20, 20, 20, 255})
+	}
+
+	cx, cy := w/2, h/2
+	for x := cx - 40; x <= cx+40; x++ {
+		img.Set(x, cy, color.RGBA{255, 255, 255, 255})
+	}
+	for y := cy - 40; y <= cy+40; y++ {
+		img.Set(cx, y, color.RGBA{255, 255, 255, 255})
+	}
+	strokeRect(img, 0, 0, w, h, color.RGBA{10, 10, 10, 255})
+
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return png.Encode(f, img)
+}
+
+func fillRect(img *image.RGBA, x, y, w, h int, c color.RGBA) {
+	for yy := y; yy < y+h; yy++ {
+		for xx := x; xx < x+w; xx++ {
+			img.Set(xx, yy, c)
+		}
+	}
+}
+
+func strokeRect(img *image.RGBA, x, y, w, h int, c color.RGBA) {
+	for xx := x; xx < x+w; xx++ {
+		img.Set(xx, y, c)
+		img.Set(xx, y+h-1, c)
+	}
+	for yy := y; yy < y+h; yy++ {
+		img.Set(x, yy, c)
+		img.Set(x+w-1, yy, c)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Original UI shell demo
+// ---------------------------------------------------------------------------
 
 func runUIDemo() {
 	app, err := ui.New(ui.Config{

@@ -49,7 +49,7 @@ func (r *float32Reader) Read(p []byte) (int, error) {
 
 	r.pull(fbuf)
 
-	for i := 0; i < nFloats; i++ {
+	for i := range nFloats {
 		binary.LittleEndian.PutUint32(p[i*4:], math.Float32bits(fbuf[i]))
 	}
 	return nFloats * 4, nil

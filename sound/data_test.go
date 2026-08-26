@@ -44,7 +44,7 @@ func makeStereoWAV(rate int) []byte {
 	buf.WriteString("data")
 	_ = binary.Write(&buf, binary.LittleEndian, uint32(4*n))
 
-	for i := 0; i < n; i++ {
+	for i := range n {
 		s := math.Sin(2 * math.Pi * 440 * float64(i) / float64(rate))
 		v := int16(s * 30000)
 		_ = binary.Write(&buf, binary.LittleEndian, v)
@@ -64,7 +64,7 @@ func TestMixerProducesAudio(t *testing.T) {
 
 	out := make([]float32, rate) // 1 second of mono-interleaved samples
 	peak := float32(0)
-	for i := 0; i < 4; i++ {
+	for range 4 {
 		m.Mix(out)
 		for _, s := range out {
 			a := s

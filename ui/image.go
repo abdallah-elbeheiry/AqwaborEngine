@@ -77,13 +77,17 @@ func (a *ImageAsset) Path() string { return a.path }
 // Size returns the natural pixel dimensions of the asset.
 func (a *ImageAsset) Size() (int, int) { return a.width, a.height }
 
-func (a *ImageAsset) acquire() {
+// Acquire registers an active consumer of the asset (e.g. a widget that will
+// render it). The asset is not released by TryRelease while any user remains.
+func (a *ImageAsset) Acquire() {
 	a.mu.Lock()
 	a.activeUsers++
 	a.mu.Unlock()
 }
 
-func (a *ImageAsset) releaseUser() int {
+// ReleaseUser unregisters one active consumer. It returns the remaining user
+// count. When the count reaches zero the asset becomes eligible for release.
+func (a *ImageAsset) ReleaseUser() int {
 	a.mu.Lock()
 	if a.activeUsers > 0 {
 		a.activeUsers--
@@ -93,10 +97,10 @@ func (a *ImageAsset) releaseUser() int {
 	return n
 }
 
-// take returns the pixel data and whether it is still valid (not released).
-// It is the only supported way for a widget to read the image, so that a
-// concurrent ForceRelease cannot be observed mid-draw as a use-after-free.
-func (a *ImageAsset) take() (image.Image, bool) {
+// Take returns the pixel data and whether it is still valid (not released). It
+// is the only supported way to read the image, so that a concurrent
+// ForceRelease cannot be observed mid-draw as a use-after-free.
+func (a *ImageAsset) Take() (image.Image, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.img, !a.released

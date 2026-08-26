@@ -16,8 +16,8 @@ func writeJPEG(t *testing.T, name string, w, h int) string {
 	dir := t.TempDir()
 	p := filepath.Join(dir, name)
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
+	for y := range h {
+		for x := range w {
 			img.Set(x, y, color.RGBA{uint8(x * 6), uint8(y * 6), 100, 255})
 		}
 	}
@@ -83,7 +83,7 @@ func TestImageLoadJPEGSVG(t *testing.T) {
 		if a.width < tc.wantW || a.height < tc.wantH {
 			t.Fatalf("%s: size %dx%d, want >= %dx%d", tc.name, a.width, a.height, tc.wantW, tc.wantH)
 		}
-		img, ok := a.take()
+		img, ok := a.Take()
 		if !ok || img == nil {
 			t.Fatalf("%s: take returned empty", tc.name)
 		}

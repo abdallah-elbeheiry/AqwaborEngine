@@ -22,6 +22,13 @@ func Label(text string) LabelWidget {
 	return uiprim.Text(text)
 }
 
+// LabelFn creates a reactive text label whose content is recomputed on every
+// draw from fn. Use it for live readouts (e.g. a camera HUD) without rebuilding
+// the widget tree.
+func LabelFn(fn func() string) LabelWidget {
+	return uiprim.TextFn(fn)
+}
+
 // CrossAxisAlignment selects how a box aligns its children on the cross axis.
 // For a Column the cross axis is horizontal; for a Row it is vertical.
 type CrossAxisAlignment = uiprim.CrossAxisAlignment
