@@ -9,8 +9,14 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
+	"github.com/abdallah-elbeheiry/AqwaborEngine/camera"
+	"github.com/abdallah-elbeheiry/AqwaborEngine/input"
+	gogpuinput "github.com/abdallah-elbeheiry/AqwaborEngine/input/backend/gogpu"
 	"github.com/abdallah-elbeheiry/AqwaborEngine/logx"
+	"github.com/abdallah-elbeheiry/AqwaborEngine/mapdata"
+	"github.com/abdallah-elbeheiry/AqwaborEngine/maprender"
 	"github.com/abdallah-elbeheiry/AqwaborEngine/render"
 	"github.com/abdallah-elbeheiry/AqwaborEngine/schedulers"
 	"github.com/abdallah-elbeheiry/AqwaborEngine/sound"
@@ -42,7 +48,7 @@ func main() {
 		}
 	}
 
-	mode := flag.String("mode", "ui", "demo mode: ui (widget shell), window (raw vertices), map (MapView + Camera)")
+	mode := flag.String("mode", "world", "demo mode: ui (widget shell), window (raw vertices), map (MapView + Camera)")
 	flag.Parse()
 
 	switch *mode {
@@ -50,6 +56,8 @@ func main() {
 		runWindowDemo()
 	case "map":
 		runMapDemo()
+	case "world":
+		runWorldDemo()
 	default:
 		runUIDemo()
 	}
@@ -368,4 +376,115 @@ func runWindowDemo() {
 	}); err != nil {
 		logx.Fatalf("window run failed: %v", err)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// World vector map demo (loads world_v3.json, draws with camera)
+// ---------------------------------------------------------------------------
+
+func runWorldDemo() {
+	win, err := window.NewWindow(window.WindowConfig{
+		Title:     "Aqwabor — World Map",
+		W:         1280,
+		H:         720,
+		Resizable: true,
+	})
+	if err != nil {
+		logx.Fatalf("window: %v", err)
+	}
+	defer win.Close()
+
+	worldPath := "examples/world_v3.json"
+	world, err := mapdata.LoadJSON(worldPath)
+	if err != nil {
+		logx.Fatalf("load world: %v", err)
+	}
+	logx.Info("world loaded", "geoms", world.GeomCount, "verts", len(world.Coords)/2, "layers", len(world.Layers))
+
+	cam := camera.NewCamera()
+	cam.Fit(geometry.Sz(360, 180), geometry.Sz(1280, 720))
+	cam.SetPosition(geometry.Pt(0, 0))
+	cam.SetZoomLimits(0.01, 1000)
+
+	rend := maprender.NewRenderer(world, cam, win)
+
+	app := win.App()
+	mgr := input.NewManager(gogpuinput.NewBackend(app))
+
+	// Scroll-wheel zoom is captured on the main thread (gogpu's OnScroll
+	// callback) into a small accumulator. Reading gogpu's transient frame-scroll
+	// state from inside OnDraw races with its per-frame reset on the main
+	// thread, so it is always observed as 0 there. The accumulator survives the
+	// thread boundary and is drained once per frame below.
+	var scrollMu sync.Mutex
+	var scrollDy float32
+	app.EventSource().OnScroll(func(_, dy float64) {
+		scrollMu.Lock()
+		scrollDy -= float32(dy)
+		scrollMu.Unlock()
+	})
+
+	panAction := mgr.Action("pan")
+	mgr.BindMouseButton(panAction, input.MouseButtonLeft)
+	panAction.OnDrag(func(dx, dy float64, _ input.Context) {
+		cam.Pan(geometry.Pt(float32(dx), float32(dy)))
+	})
+
+	zoomInAction := mgr.Action("zoom_in")
+	mgr.BindKey(zoomInAction, input.KeyEqual)
+	zoomInAction.OnPressed(func(_ input.Context) {
+		cam.SetZoom(cam.Zoom() * 1.1)
+	})
+
+	zoomOutAction := mgr.Action("zoom_out")
+	mgr.BindKey(zoomOutAction, input.KeyMinus)
+	zoomOutAction.OnPressed(func(_ input.Context) {
+		cam.SetZoom(cam.Zoom() / 1.1)
+	})
+
+	resetAction := mgr.Action("reset")
+	mgr.BindKey(resetAction, input.KeyR)
+	resetAction.OnPressed(func(_ input.Context) {
+		cam.Fit(geometry.Sz(360, 180), geometry.Sz(1280, 720))
+		cam.SetPosition(geometry.Pt(0, 0))
+	})
+
+	var lastFrame time.Time
+	lastFrame = time.Now()
+
+	logx.Info("world demo running: drag to pan, scroll to zoom, R=reset, =/- zoom")
+	if err := win.Run(func(dc *gogpu.Context) {
+		now := time.Now()
+		dt := float64(now.Sub(lastFrame).Seconds())
+		lastFrame = now
+
+		mgr.Update(dt)
+
+		vp := geometry.Sz(1280, 720)
+
+		// Apply accumulated scroll-wheel zoom toward the cursor.
+		scrollMu.Lock()
+		sd := scrollDy
+		scrollDy = 0
+		scrollMu.Unlock()
+		if sd != 0 {
+			// gogpu reports scroll-up as negative dy, so scroll up = zoom in.
+			factor := float32(1.1)
+			if sd < 0 {
+				factor = 1 / 1.1
+			}
+			mx, my := app.Input().Mouse().Position()
+			cam.ZoomAt(factor, geometry.Pt(mx, my), vp)
+		}
+
+		rend.SetViewport(vp)
+
+		dc.Clear(0.05, 0.05, 0.1, 1)
+
+		_ = rend.Draw(dc)
+	}); err != nil {
+		logx.Fatalf("window run failed: %v", err)
+	}
+
+	world.Unload()
 }

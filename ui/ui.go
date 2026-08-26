@@ -63,7 +63,8 @@ func New(cfg Config) (*App, error) {
 	gogpuApp := gogpu.NewApp(gogpu.DefaultConfig().
 		WithTitle(title).
 		WithSize(cfg.W, cfg.H).
-		WithResizable(cfg.Resizable))
+		WithResizable(cfg.Resizable).
+		WithContinuousRender(true))
 
 	th := cfg.Theme
 	if th == nil {

@@ -57,7 +57,8 @@ func NewWindow(cfg WindowConfig) (*Window, error) {
 	app := gogpu.NewApp(gogpu.DefaultConfig().
 		WithTitle(cfg.Title).
 		WithSize(cfg.W, cfg.H).
-		WithResizable(cfg.Resizable))
+		WithResizable(cfg.Resizable).
+		WithContinuousRender(true))
 	log.Debug("window created", "title", cfg.Title, "w", cfg.W, "h", cfg.H, "resizable", cfg.Resizable)
 	return &Window{app: app, cfg: cfg}, nil
 }
