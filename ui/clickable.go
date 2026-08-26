@@ -53,12 +53,21 @@ func (w *clickableWidget) fire() {
 	}
 }
 
-// Layout sizes the clickable to its content and adopts that size.
+// Layout sizes the clickable to its content and adopts that size. It also
+// positions the content to fill the clickable (no insets) so descendant
+// bounds/hit-testing are correct for children that don't self-bound (e.g. the
+// toolkit's Button).
 func (w *clickableWidget) Layout(ctx widget.Context, c geometry.Constraints) geometry.Size {
 	if w.content == nil {
 		return c.Constrain(geometry.Sz(0, 0))
 	}
 	s := w.content.Layout(ctx, c)
+	// Position the content to fill the clickable (no insets) so descendant
+	// bounds/hit-testing are correct for children that don't self-bound (e.g.
+	// the toolkit's Button). SetBounds is an optional WidgetBase method.
+	if bs, ok := w.content.(interface{ SetBounds(geometry.Rect) }); ok {
+		bs.SetBounds(geometry.FromPointSize(w.Position(), s))
+	}
 	w.SetBounds(geometry.FromPointSize(w.Position(), s))
 	return s
 }
@@ -95,17 +104,73 @@ func (w *clickableWidget) Children() []widget.Widget {
 }
 
 // GestureHitTest exposes the click recognizer to the toolkit gesture pipeline.
-func (w *clickableWidget) GestureHitTest(_ geometry.Point) []gesture.Recognizer {
+//
+// To honor nested interactive content (e.g. a Button inside a Clickable) the
+// clickable yields to any gesture-aware descendant that is actually hit by this
+// pointer: it returns no recognizer of its own, so the descendant becomes the
+// sole arena participant and the parent's onClick is never invoked. This mirrors
+// the toolkit's own container pattern (see gesture.GestureAware) and keeps a
+// single input pipeline. The decision is per pointer (no global state), and it
+// is position-specific: a non-interactive region of the clickable still fires
+// the parent.
+func (w *clickableWidget) GestureHitTest(pos geometry.Point) []gesture.Recognizer {
+	if w.interactiveDescendantAt(pos) {
+		return nil
+	}
 	if w.clickRec == nil {
 		w.clickRec = w.newClickRecognizer()
 	}
 	return []gesture.Recognizer{w.clickRec}
 }
 
-// ImageButton is a clickable image capped to a 128×128 box (Contain) so large
-// assets don't overflow the layout. It is a thin wrapper over Clickable + Image.
+// interactiveDescendantAt reports whether pos falls inside a gesture-aware
+// descendant that would itself participate in the gesture arena at that point.
+// It walks the whole content subtree so suppression composes recursively
+// (Clickable > Clickable > Button).
+func (w *clickableWidget) interactiveDescendantAt(localPos geometry.Point) bool {
+	global := localPos
+	o := w.ScreenOrigin()
+	global = geometry.Pt(localPos.X+o.X, localPos.Y+o.Y)
+	return interactiveAtPoint(w.content, global)
+}
+
+// interactiveAtPoint reports whether global lies within a gesture-aware widget
+// whose own GestureHitTest would return a recognizer there. Requiring both the
+// widget's screen bounds to contain the point and its GestureHitTest to accept
+// it avoids suppressing the parent merely because a nested GestureAware widget
+// exists off to the side or behind a partial interactive region (e.g. a
+// collapsible header).
+func interactiveAtPoint(w widget.Widget, global geometry.Point) bool {
+	if w == nil {
+		return false
+	}
+	if ga, ok := w.(gesture.GestureAware); ok {
+		if sb, ok := w.(interface{ ScreenBounds() geometry.Rect }); ok && sb.ScreenBounds().Contains(global) {
+			local := global
+			if so, ok := w.(interface{ ScreenOrigin() geometry.Point }); ok {
+				o := so.ScreenOrigin()
+				local = geometry.Pt(global.X-o.X, global.Y-o.Y)
+			}
+			if recs := ga.GestureHitTest(local); len(recs) > 0 {
+				return true
+			}
+		}
+	}
+	for _, c := range w.Children() {
+		if interactiveAtPoint(c, global) {
+			return true
+		}
+	}
+	return false
+}
+
+// ImageButton is a clickable image. It is a thin, unopinionated wrapper over
+// Clickable + Image: the image keeps its natural/default sizing and the caller
+// is free to size it explicitly (e.g. ui.Image(icon).Size(32, 32)). No fixed
+// dimensions or fit mode are baked in.
 //
 //	ui.ImageButton(play, startGame)
+//	ui.Clickable(ui.Image(play).Size(32, 32), startGame) // explicit sizing
 func ImageButton(asset *ImageAsset, onClick func()) Widget {
-	return Clickable(Image(asset).Size(128, 128).Fit(Contain), onClick)
+	return Clickable(Image(asset), onClick)
 }

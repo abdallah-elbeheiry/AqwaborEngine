@@ -365,6 +365,122 @@ func TestExistingButtonUnchanged(t *testing.T) {
 	var _ Widget = Button("Play", func() {})
 }
 
+// TestConstructedImageDoesNotBlockRelease locks in the rule: constructing an
+// image widget (without mounting it in the tree) must NOT count as active use,
+// so the asset can still be released. Construction ≠ active use.
+func TestConstructedImageDoesNotBlockRelease(t *testing.T) {
+	mgr := NewImageManager()
+	p := tempPNG(t, "c.png", 10, 10)
+	a, _ := mgr.Load(p)
+
+	_ = Image(a) // constructed but never mounted
+
+	if a.Users() != 0 {
+		t.Fatalf("constructed (unmounted) widget users = %d, want 0", a.Users())
+	}
+	if !mgr.TryRelease(a) {
+		t.Fatal("TryRelease must succeed for a merely-constructed asset")
+	}
+}
+
+// TestCacheNormalization verifies that paths which normalize to the same
+// filesystem identity share one cached asset, and that releasing then reloading
+// yields a fresh, valid asset while the old one stays released.
+func TestCacheNormalization(t *testing.T) {
+	mgr := NewImageManager()
+	base := tempPNG(t, "x.png", 12, 12)
+	dir := filepath.Dir(base)
+	name := filepath.Base(base)
+
+	variants := []string{
+		base,
+		filepath.Join(dir, ".", name),
+		filepath.Join(dir, "nested", "..", name),
+	}
+	first, err := mgr.Load(variants[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range variants[1:] {
+		a, err := mgr.Load(v)
+		if err != nil {
+			t.Fatalf("Load(%s): %v", v, err)
+		}
+		if a != first {
+			t.Fatalf("Load(%s) returned a different asset; cache key not normalized", v)
+		}
+	}
+
+	// Release, then reload the same identity → a new valid asset; old stays released.
+	if !mgr.TryRelease(first) {
+		t.Fatal("TryRelease failed")
+	}
+	if !first.IsReleased() {
+		t.Fatal("released asset must report IsReleased")
+	}
+	reloaded, err := mgr.Load(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded == first {
+		t.Fatal("Load after release must create a new asset")
+	}
+	if reloaded.IsReleased() {
+		t.Fatal("reloaded asset must not be released")
+	}
+}
+
+// TestMountUnmountReleaseStress hammers the mount → use → unmount → release cycle
+// to surface usage-count leaks, negatives, stale registrations, or double frees.
+func TestMountUnmountReleaseStress(t *testing.T) {
+	mgr := NewImageManager()
+	p := tempPNG(t, "s.png", 8, 8)
+	const N = 300
+	for i := 0; i < N; i++ {
+		a, err := mgr.Load(p)
+		if err != nil {
+			t.Fatalf("iter %d Load: %v", i, err)
+		}
+		if a.IsReleased() {
+			t.Fatalf("iter %d: asset already released", i)
+		}
+		w := Image(a)
+		w.Mount(uitest.NewMockContext())
+		if a.Users() != 1 {
+			t.Fatalf("iter %d: users = %d, want 1", i, a.Users())
+		}
+		w.Unmount()
+		if a.Users() != 0 {
+			t.Fatalf("iter %d: after unmount users = %d, want 0", i, a.Users())
+		}
+		if !mgr.TryRelease(a) {
+			t.Fatalf("iter %d: TryRelease failed", i)
+		}
+		if !a.IsReleased() {
+			t.Fatalf("iter %d: asset not released", i)
+		}
+	}
+}
+
+// TestDoubleUnmount ensures unmounting the same widget twice cannot drive the
+// usage count negative or panic.
+func TestDoubleUnmount(t *testing.T) {
+	mgr := NewImageManager()
+	p := tempPNG(t, "du.png", 8, 8)
+	a, _ := mgr.Load(p)
+
+	w := Image(a)
+	w.Mount(uitest.NewMockContext())
+	w.Unmount()
+	if a.Users() != 0 {
+		t.Fatalf("after unmount users = %d, want 0", a.Users())
+	}
+	w.Unmount() // must be a no-op, not negative
+	if a.Users() != 0 {
+		t.Fatalf("after double unmount users = %d, want 0", a.Users())
+	}
+}
+
 var (
 	_ widget.Widget        = (*imageWidget)(nil)
 	_ widget.Lifecycle     = (*imageWidget)(nil)
