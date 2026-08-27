@@ -479,7 +479,10 @@ func runWorldDemo() {
 
 		rend.SetViewport(vp)
 
-		dc.Clear(0.05, 0.05, 0.1, 1)
+		// The data carries its own background, so the land colour sits on the
+		// same ground it was designed against.
+		bg := world.Background
+		dc.Clear(bg.R, bg.G, bg.B, bg.A)
 
 		_ = rend.Draw(dc)
 	}); err != nil {
