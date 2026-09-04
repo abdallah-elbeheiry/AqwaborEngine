@@ -210,11 +210,6 @@ func getTyped[T any](p *componentPool, h Handle) (*T, bool) {
 }
 
 // handlesFor returns all live handles for a component type.
-func (p *componentPool) handlesFor(componentID ComponentID) []Handle {
-	return p.byType[componentID]
-}
-
-// typeOf is a helper to extract reflect.Type from a generic parameter.
 func typeOf[T any]() reflect.Type {
 	var zero T
 	t := reflect.TypeOf(zero)

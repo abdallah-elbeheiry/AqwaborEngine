@@ -1,7 +1,6 @@
 package ecs
 
 import (
-	"reflect"
 	"slices"
 	"unsafe"
 
@@ -362,7 +361,7 @@ func (w *World) moveEntityToTable(e Entity, meta *entityMeta, from, to tableID) 
 	// Add to new table
 	newTable := w.tableGraph.get(to)
 	if newTable != nil {
-		newRow := newTable.add(e, w.log)
+		newRow := newTable.add(e)
 		meta.tableID = int(to)
 		meta.row = newRow
 	} else {
@@ -400,28 +399,6 @@ func GetSystem[T System](w *World) (T, bool) {
 // Flush applies all deferred structural changes.
 func (w *World) Flush() {
 	w.cmdBuf.apply(w)
-}
-
-// --- Internal helpers ---
-
-func (w *World) componentPtr(e Entity, componentID ComponentID) unsafe.Pointer {
-	meta := w.entities.meta(e)
-	if meta == nil {
-		return nil
-	}
-	h, ok := meta.components[componentID]
-	if !ok {
-		return nil
-	}
-	inst, ok := w.pool.get(h)
-	if !ok {
-		return nil
-	}
-	return inst.data
-}
-
-func (w *World) componentInfoForType(typ reflect.Type) (*componentInfo, bool) {
-	return w.registry.lookup(typ)
 }
 
 // --- Command buffer internal helpers ---

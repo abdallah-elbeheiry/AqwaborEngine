@@ -44,11 +44,10 @@ func newTable(key archetypeKey, l *logx.Logger) *table {
 }
 
 // add inserts an entity. Returns the row index.
-func (t *table) add(e Entity, l *logx.Logger) int {
+func (t *table) add(e Entity) int {
 	row := t.count
 	t.entities = append(t.entities, e)
 	t.count++
-	l.Debug("entity added to table", "entity", e, "archetype", t.key, "row", row)
 	return row
 }
 
@@ -68,15 +67,6 @@ func (t *table) remove(row int, l *logx.Logger) (removed Entity, swapped Entity)
 
 	l.Debug("entity removed from table", "entity", removed, "archetype", t.key, "row", row)
 	return removed, swapped
-}
-
-func (t *table) has(componentID ComponentID) bool {
-	for _, cid := range t.key {
-		if cid == componentID {
-			return true
-		}
-	}
-	return false
 }
 
 func (t *table) len() int {

@@ -52,27 +52,29 @@ func (g *Group) componentData(e Entity, cid ComponentID) (any, bool) {
 	return info.wrap(inst.data), true
 }
 
-// Float64s gathers the values pointed to by getter from all group entities
-// into a contiguous []float64. The getter receives each component as a typed *T
-// wrapped in any. If the getter's type assertion fails for a component, it is skipped.
-// For signature-based groups, only the declared component types are tried.
-// For entity-based groups, all of each entity's components are tried.
+// entityCids returns the component IDs to iterate for a given entity.
+// For signature-based groups, returns the declared ids.
+// For entity-based groups, returns all of the entity's component IDs.
+func (g *Group) entityCids(e Entity) []ComponentID {
+	if g.ids != nil {
+		return g.ids
+	}
+	meta := g.w.entities.meta(e)
+	if meta == nil {
+		return nil
+	}
+	cids := make([]ComponentID, 0, len(meta.components))
+	for cid := range meta.components {
+		cids = append(cids, cid)
+	}
+	return cids
+}
+
 func (g *Group) Float64s(getter FieldGetter) []float64 {
 	g.resolve()
 	result := make([]float64, 0, len(g.members))
 	for _, e := range g.members {
-		cids := g.ids
-		if cids == nil {
-			meta := g.w.entities.meta(e)
-			if meta == nil {
-				continue
-			}
-			cids = make([]ComponentID, 0, len(meta.components))
-			for cid := range meta.components {
-				cids = append(cids, cid)
-			}
-		}
-		for _, cid := range cids {
+		for _, cid := range g.entityCids(e) {
 			data, ok := g.componentData(e, cid)
 			if !ok {
 				continue
@@ -86,24 +88,11 @@ func (g *Group) Float64s(getter FieldGetter) []float64 {
 	return result
 }
 
-// Float32s gathers the values pointed to by getter from all group entities
-// into a contiguous []float32.
 func (g *Group) Float32s(getter FieldGetter32) []float32 {
 	g.resolve()
 	result := make([]float32, 0, len(g.members))
 	for _, e := range g.members {
-		cids := g.ids
-		if cids == nil {
-			meta := g.w.entities.meta(e)
-			if meta == nil {
-				continue
-			}
-			cids = make([]ComponentID, 0, len(meta.components))
-			for cid := range meta.components {
-				cids = append(cids, cid)
-			}
-		}
-		for _, cid := range cids {
+		for _, cid := range g.entityCids(e) {
 			data, ok := g.componentData(e, cid)
 			if !ok {
 				continue
@@ -117,7 +106,6 @@ func (g *Group) Float32s(getter FieldGetter32) []float32 {
 	return result
 }
 
-// scatter64 writes values back from a contiguous slice into the group entities.
 func (g *Group) scatter64(values []float64, setter func(c any, v float64)) {
 	g.resolve()
 	idx := 0
@@ -125,18 +113,7 @@ func (g *Group) scatter64(values []float64, setter func(c any, v float64)) {
 		if idx >= len(values) {
 			break
 		}
-		cids := g.ids
-		if cids == nil {
-			meta := g.w.entities.meta(e)
-			if meta == nil {
-				continue
-			}
-			cids = make([]ComponentID, 0, len(meta.components))
-			for cid := range meta.components {
-				cids = append(cids, cid)
-			}
-		}
-		for _, cid := range cids {
+		for _, cid := range g.entityCids(e) {
 			data, ok := g.componentData(e, cid)
 			if !ok {
 				continue
@@ -162,18 +139,7 @@ func (g *Group) scatter32(values []float32, setter func(c any, v float32)) {
 		if idx >= len(values) {
 			break
 		}
-		cids := g.ids
-		if cids == nil {
-			meta := g.w.entities.meta(e)
-			if meta == nil {
-				continue
-			}
-			cids = make([]ComponentID, 0, len(meta.components))
-			for cid := range meta.components {
-				cids = append(cids, cid)
-			}
-		}
-		for _, cid := range cids {
+		for _, cid := range g.entityCids(e) {
 			data, ok := g.componentData(e, cid)
 			if !ok {
 				continue

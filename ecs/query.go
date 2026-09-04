@@ -2,8 +2,6 @@ package ecs
 
 import (
 	"reflect"
-
-	"github.com/abdallah-elbeheiry/AqwaborEngine/logx"
 )
 
 // Query iterates entities that own a specific component type.
@@ -280,8 +278,7 @@ func (q *Query[T]) CountIf(fn func(Entity, *T) bool) int {
 type Group struct {
 	w       *World
 	ids     []ComponentID // non-nil = signature-based mode
-	infos   []*componentInfo
-	members []Entity // resolved or explicit entity list
+	members []Entity      // resolved or explicit entity list
 }
 
 // resolve builds the members list for signature-based groups.
@@ -336,7 +333,6 @@ func newGroup(w *World, components ...any) *Group {
 			continue
 		}
 		g.ids = append(g.ids, info.id)
-		g.infos = append(g.infos, info)
 	}
 	w.log.Debug("group created", "component_ids", g.ids)
 	return g
@@ -389,7 +385,6 @@ func (g *Group) Add(e Entity) {
 		return
 	}
 	g.ids = nil
-	g.infos = nil
 	g.members = append(g.members, e)
 }
 
@@ -397,7 +392,6 @@ func (g *Group) Add(e Entity) {
 func (g *Group) AddEntities(entities ...Entity) {
 	g.resolve()
 	g.ids = nil
-	g.infos = nil
 	for _, e := range entities {
 		if g.w.entities.alive(e) {
 			g.members = append(g.members, e)
@@ -409,7 +403,6 @@ func (g *Group) AddEntities(entities ...Entity) {
 func (g *Group) Remove(e Entity) {
 	g.resolve()
 	g.ids = nil
-	g.infos = nil
 	for i, m := range g.members {
 		if m == e {
 			g.members = append(g.members[:i], g.members[i+1:]...)
@@ -421,7 +414,6 @@ func (g *Group) Remove(e Entity) {
 // Clear removes all entities from the group.
 func (g *Group) Clear() {
 	g.ids = nil
-	g.infos = nil
 	g.members = g.members[:0]
 }
 
@@ -436,6 +428,3 @@ func (g *Group) Filter(fn func(Entity) bool) *Group {
 	}
 	return &Group{w: g.w, members: filtered}
 }
-
-// ensure logx is used (imported for logging via World)
-var _ = (*logx.Logger)(nil)
