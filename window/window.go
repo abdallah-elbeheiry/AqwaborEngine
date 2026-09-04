@@ -41,7 +41,7 @@ type Window struct {
 	cfg WindowConfig
 
 	mu           sync.Mutex
-	pendingBufs  []*wgpu.Buffer
+	genBufs      [][]*wgpu.Buffer // per-frame vertex buffers; old generations released after the GPU is done
 	frameCleared bool
 }
 
@@ -72,6 +72,20 @@ func (w *Window) Run(onDraw func(dc *gogpu.Context)) error {
 	wrapped := func(dc *gogpu.Context) {
 		w.mu.Lock()
 		w.frameCleared = false
+		// Start a fresh generation of vertex buffers. Buffers from more than
+		// three frames ago are safe to release: their command buffers have long
+		// since been submitted and executed by the GPU, so freeing them now can
+		// no longer race with an in-flight submission (the old "keep only 8
+		// buffers" rule released buffers still referenced by the current frame).
+		w.genBufs = append(w.genBufs, nil)
+		if len(w.genBufs) > 4 {
+			for _, b := range w.genBufs[0] {
+				if b != nil {
+					b.Release()
+				}
+			}
+			w.genBufs = w.genBufs[1:]
+		}
 		w.mu.Unlock()
 		log.Trace("frame begin")
 		onDraw(dc)
@@ -92,32 +106,26 @@ func (w *Window) Close() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	released := 0
-	for _, b := range w.pendingBufs {
-		if b != nil {
-			b.Release()
-			released++
+	for _, gen := range w.genBufs {
+		for _, b := range gen {
+			if b != nil {
+				b.Release()
+				released++
+			}
 		}
 	}
-	w.pendingBufs = nil
+	w.genBufs = nil
 	log.Debug("window closed", "buffers_released", released)
 }
 
 func (w *Window) retainBuffer(b *wgpu.Buffer) {
 	w.mu.Lock()
-	w.pendingBufs = append(w.pendingBufs, b)
-	total := len(w.pendingBufs)
-	if total > 8 {
-		toRelease := w.pendingBufs[0]
-		w.pendingBufs = w.pendingBufs[1:]
-		w.mu.Unlock()
-		if toRelease != nil {
-			toRelease.Release()
-		}
-		log.Trace("released oldest retained buffer", "live_buffers", len(w.pendingBufs))
-		return
+	defer w.mu.Unlock()
+	if len(w.genBufs) == 0 {
+		w.genBufs = append(w.genBufs, nil)
 	}
-	w.mu.Unlock()
-	log.Trace("retained vertex buffer", "live_buffers", total)
+	cur := w.genBufs[len(w.genBufs)-1]
+	w.genBufs[len(w.genBufs)-1] = append(cur, b)
 }
 
 func (w *Window) Draw(dc *gogpu.Context, vertices []Vertex) error {

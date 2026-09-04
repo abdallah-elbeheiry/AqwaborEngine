@@ -103,7 +103,7 @@ func (r *Renderer) buildFills() {
 		i int
 	}
 	maxN := int32(0)
-	for wk := 0; wk < workers; wk++ {
+	for range workers {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -256,7 +256,7 @@ func (r *Renderer) project(geomID int32) {
 	start := r.world.GeomStart[geomID]
 	n := r.world.GeomN[geomID]
 	scale := float32(r.world.Scale)
-	for i := int32(0); i < n; i++ {
+	for i := range n {
 		lon := float32(r.world.Coords[start+i*2]) / scale
 		lat := float32(r.world.Coords[start+i*2+1]) / scale
 		r.scratch[i] = r.cam.WorldToLocal(geometry.Pt(lon, -lat), r.viewport)

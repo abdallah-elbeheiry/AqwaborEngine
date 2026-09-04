@@ -17,8 +17,12 @@ require (
 )
 
 require (
+	github.com/chewxy/math32 v1.10.1 // indirect
 	github.com/coregx/signals v0.1.1 // indirect
-	golang.org/x/net v0.0.0-20211118161319-6a13c67c3ce4 // indirect
+	github.com/viterin/partial v1.1.0 // indirect
+	github.com/viterin/vek v0.4.3 // indirect
+	golang.org/x/exp v0.0.0-20230817173708-d852ddb80c63 // indirect
+	golang.org/x/net v0.56.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
 )
 
