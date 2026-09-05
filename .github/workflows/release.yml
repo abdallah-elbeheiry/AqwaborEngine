@@ -1,0 +1,65 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # The same checks CI runs, against the tagged commit rather than the
+      # branch it came from. A tag is the only thing that becomes a version, so
+      # it is verified on its own.
+      - run: go vet ./...
+      - run: go build ./...
+      - run: go test ./...
+
+      - name: publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Notes come from the commit subjects, not from merged pull requests.
+          # GitHub's own --generate-notes lists PRs and nothing else, so on a
+          # repository where work lands as direct pushes it produces an empty
+          # body. The conventional commit subjects are the changelog here.
+          previous=$(git describe --tags --abbrev=0 "$GITHUB_REF_NAME^" 2>/dev/null || true)
+          range="${previous:+$previous..}$GITHUB_REF_NAME"
+
+          # A SemVer prerelease is the only version with a hyphen in it, and it
+          # is marked as one so nobody reads v1.1.0-rc.1 as a release.
+          prerelease=""
+          case "$GITHUB_REF_NAME" in
+            *-*) prerelease="--prerelease" ;;
+          esac
+
+          {
+            git log --no-merges --pretty='- %s (%h)' "$range"
+            echo
+            if [ -n "$previous" ]; then
+              echo "**Full changelog**: ${{ github.server_url }}/${{ github.repository }}/compare/$previous...$GITHUB_REF_NAME"
+            fi
+          } | gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file - $prerelease
+
+      - name: warm the module proxy
+        run: |
+          # Asks proxy.golang.org for the new version so the first consumer to
+          # run `go get` is not the one waiting for it to be fetched.
+          module=$(go list -m)
+          GOPROXY=https://proxy.golang.org GOFLAGS= go list -m "$module@$GITHUB_REF_NAME" || true
