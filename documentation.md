@@ -20,25 +20,45 @@ aqwabor/
 │   ├── parallel.go        — Future / ParallelFor / AwaitAll
 │   ├── scheduler_test.go
 │   └── parallel_test.go
-├── window/window.go       — goGPU auto window + colored vertices
-├── sound/                 — audio: Context → Clip (cached asset) → Player (instance)
-│   ├── sound.go           — Context, New, Close, master volume, options
-│   ├── clip.go            — LoadAudio/LoadAudioFile, cache, Clip volume
-│   ├── player.go          — Play/PlayLoop/Stop/Pause/Resume, effective volume
-│   ├── backend.go         — gogpu/audio wiring (WAV + MP3), looping PCM source
-│   └── sound_test.go
-├── input/                 — high-level input system
-│   ├── input.go           — Manager + Backend
-│   ├── action.go          — Action + derived events
-│   └── backend/           — gogpu + headless backends
+├── render/                — GPU submission layer (single path for game content)
+│   ├── gpu.go             — GPU facade: Begin/End, SetCamera, DrawInstanced, DrawSpritesCulled, DrawStrokes
+│   ├── renderer.go        — Renderer: per-frame render pass, pipeline management
+│   ├── pipeline.go        — Instanced pipeline (camera uniform, bind groups)
+│   ├── buffer.go          — InstanceBuffer: long-lived GPU buffer with dirty-range tracking
+│   ├── mesh.go            — Mesh: shared immutable geometry (unit quad, custom)
+│   ├── instance.go        — InstanceData (64-byte POD), InstanceBufferLayout
+│   ├── cull.go            — CullPipeline: GPU compute cull + indirect draw (internal)
+│   ├── stroke.go          — StrokeSegment, BuildSegments (polylines → GPU instances)
+│   ├── strokebuffer.go    — StrokeBuffer: GPU buffer for stroke segments
+│   ├── strokepipeline.go  — StrokePipeline: screen-space-width polylines
+│   ├── mapmesh.go         — MapMesh, BuildMapMesh, ComputeViewProj
+│   ├── mapstroke.go       — BuildMapStrokes (map polylines → stroke segments)
+│   ├── mapvertex.go       — MapVertex: compact 12-byte int32 + unorm8x4
+│   ├── mappipeline.go     — MapPipeline: camera uniform for map geometry
+│   ├── documentation.md   — render API reference
+│   └── shaders/
+│       ├── instanced.wgsl      — instanced vertex shader (mesh + instance + camera)
+│       ├── instanced_frag.wgsl — instanced fragment output
+│       ├── cull.wgsl           — GPU compute cull (frustum/AABB + compact)
+│       ├── stroke.wgsl         — stroke vertex shader (screen-space expansion)
+│       ├── stroke_frag.wgsl    — stroke fragment output
+│       ├── map.wgsl            — map fill vertex shader (int32 coords)
+│       └── fragment.wgsl       — shared fragment passthrough
+├── camera/                — 2D camera with pan/zoom
+├── mapdata/               — JSON world data loading
+├── maprender/             — map data → fill/stroke batches via render APIs
+├── mapview/               — pannable/zoomable image widget (CPU-scaled)
 ├── ui/                    — thin façade over gogpu/ui (+ desktop, gg)
 │   ├── ui.go              — Config, App, New, SetRoot, Run, Close, GogpuApp
 │   ├── widgets.go         — Label, Button, Column, Row, Box + alignment helpers
 │   └── theme.go           — default + six pre-made themes
-└── shaders/
-    ├── vertex.wgsl        — vertex shader (vs_main)
-    ├── fragment.wgsl       — fragment shader (fs_main)
-    └── colored.wgsl       — combined fallback
+├── sound/                 — audio: Context → Clip (cached asset) → Player (instance)
+├── input/                 — high-level input system
+│   ├── input.go           — Manager + Backend
+│   ├── action.go          — Action + derived events
+│   └── backend/           — gogpu + headless backends
+├── window/window.go       — goGPU auto window (shell only, never draws)
+└── examples/              — test data (fox.png, world_v3.json, song-example.mp3)
 ```
 
 Build: `CGO_ENABLED=0 go run .`

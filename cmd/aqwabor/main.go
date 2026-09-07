@@ -5,6 +5,7 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"math"
 	"os"
 	"sync"
 	"time"
@@ -46,7 +47,7 @@ func main() {
 		}
 	}
 
-	mode := flag.String("mode", "world", "demo mode: ui (widget shell), window (raw vertices), map (MapView + Camera)")
+	mode := flag.String("mode", "world", "demo mode: window (sprites + GPU cull), world (vector map), ui (widget shell)")
 	flag.Parse()
 
 	switch *mode {
@@ -239,7 +240,7 @@ func runUIDemo() {
 
 func runWindowDemo() {
 	win, err := window.NewWindow(window.WindowConfig{
-		Title:     "Aqwabor Engine - goGPU Auto",
+		Title:     "Aqwabor Engine — Sprites + GPU Cull",
 		W:         1280,
 		H:         720,
 		Resizable: true,
@@ -248,7 +249,7 @@ func runWindowDemo() {
 		logx.Fatalf("failed to create window: %v", err)
 	}
 	defer win.Close()
-	logx.Info("window ready", "title", "Aqwabor Engine - goGPU Auto", "w", 1280, "h", 720)
+	logx.Info("window ready", "title", "Aqwabor Engine — Sprites + GPU Cull", "w", 1280, "h", 720)
 
 	s := schedulers.NewScheduler()
 	s.Run(func(st schedulers.TickState) {}, 2.0)
@@ -257,31 +258,84 @@ func runWindowDemo() {
 
 	var gfx *render.GPU
 	var quad *render.Mesh
-	var instances *render.InstanceBuffer
+	var visibleInstances *render.InstanceBuffer
+	var culledInstances *render.InstanceBuffer
+
+	// Viewport half-extents for the orthographic projection.
+	vpHalfW := float32(640)
+	vpHalfH := float32(360)
 
 	if err := win.Run(func(dc *gogpu.Context) {
 		if gfx == nil {
 			gfx = render.New(win.DeviceProvider())
 			quad = render.NewUnitQuad(gfx.Device(), gfx.Queue())
-			instances = render.NewInstanceBuffer(gfx.Device(), 1)
-			instances.WriteAll([]render.InstanceData{{
-				Position: [2]float32{0, 0},
-				Scale:    [2]float32{600, 600},
-				Color:    [4]float32{1, 1, 1, 1},
-			}})
-			// Ortho: world [-300,300] → NDC [-1,1], Y flipped for screen.
-			s := float32(1.0 / 300)
-			vp := [16]float32{
-				s, 0, 0, 0,
-				0, -s, 0, 0,
-				0, 0, 1, 0,
-				0, 0, 0, 1,
+
+			// --- Visible sprites: several colored quads spread across the screen ---
+			visibleInstances = render.NewInstanceBuffer(gfx.Device(), 16)
+			visibleInstances.WriteAll([]render.InstanceData{
+				{Position: [2]float32{-300, -100}, Scale: [2]float32{80, 80}, Color: [4]float32{1, 0.2, 0.2, 1}}, // red
+				{Position: [2]float32{-150, 50}, Scale: [2]float32{120, 60}, Color: [4]float32{0.2, 1, 0.2, 1}},  // green
+				{Position: [2]float32{50, -150}, Scale: [2]float32{60, 100}, Color: [4]float32{0.2, 0.2, 1, 1}},  // blue
+				{Position: [2]float32{200, 80}, Scale: [2]float32{100, 100}, Color: [4]float32{1, 1, 0.2, 1}},    // yellow
+				{Position: [2]float32{-50, -200}, Scale: [2]float32{150, 40}, Color: [4]float32{1, 0.5, 0, 1}},   // orange
+				{Position: [2]float32{350, -50}, Scale: [2]float32{70, 70}, Color: [4]float32{0.5, 0, 1, 1}},     // purple
+				{Position: [2]float32{-400, 200}, Scale: [2]float32{90, 50}, Color: [4]float32{0, 1, 1, 1}},      // cyan
+				{Position: [2]float32{100, 250}, Scale: [2]float32{110, 30}, Color: [4]float32{1, 0, 0.5, 1}},    // pink
+			})
+
+			// --- Culled batch: many instances, most off-screen ---
+			const totalCulled = 256
+			culledInstances = render.NewInstanceBuffer(gfx.Device(), totalCulled)
+			cullData := make([]render.InstanceData, totalCulled)
+			for i := range cullData {
+				// Scatter instances in a wide ring; many will be outside the viewport.
+				angle := float32(i) * 0.245
+				radius := float32(200 + i*3)
+				x := float32(math.Cos(float64(angle))) * radius
+				y := float32(math.Sin(float64(angle))) * radius
+				cullData[i] = render.InstanceData{
+					Position: [2]float32{x, y},
+					Scale:    [2]float32{12, 12},
+					Color:    [4]float32{float32(i) / float32(totalCulled), 0.6, 1.0 - float32(i)/float32(totalCulled), 0.9},
+				}
 			}
-			gfx.SetCamera(vp, 1280, 720)
+			culledInstances.WriteAll(cullData)
+
+			logx.Info("sprites initialized",
+				"visible", 8,
+				"culled_batch", totalCulled)
 		}
-		gfx.Begin(dc, render.Clear{R: 0.05, G: 0.05, B: 0.1, A: 1})
-		gfx.DrawInstanced(quad, instances)
+
+		// Ortho: world [-vpHalfW, vpHalfW] -> NDC [-1,1], Y flipped.
+		sx := float32(1.0 / vpHalfW)
+		sy := float32(1.0 / vpHalfH)
+		vp := [16]float32{
+			sx, 0, 0, 0,
+			0, -sy, 0, 0,
+			0, 0, 1, 0,
+			0, 0, 0, 1,
+		}
+		gfx.SetCamera(vp, 1280, 720)
+
+		gfx.Begin(dc, render.Clear{R: 0.08, G: 0.08, B: 0.12, A: 1})
+
+		// Draw visible sprites (direct path).
+		gfx.DrawInstanced(quad, visibleInstances)
+
+		// Draw culled batch (GPU compute cull + indirect draw).
+		gfx.DrawSpritesCulled(quad, culledInstances, render.ViewBounds{
+			MinX: -vpHalfW, MinY: -vpHalfH,
+			MaxX: vpHalfW, MaxY: vpHalfH,
+		})
+
 		gfx.End()
+
+		stats := gfx.Stats()
+		logx.Trace("frame",
+			"draws", stats.DrawCalls,
+			"instances", stats.Instances,
+			"tris", stats.Triangles,
+			"culled_submitted", culledInstances.Count())
 	}); err != nil {
 		logx.Fatalf("window run failed: %v", err)
 	}

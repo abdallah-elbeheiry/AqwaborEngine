@@ -1,6 +1,4 @@
 // Package render provides a GPU-driven render submission layer.
-// It replaces the old Window.Draw per-call buffer allocation pattern with
-// persistent instance buffers, shared meshes, and instanced/indirect draws.
 package render
 
 import (

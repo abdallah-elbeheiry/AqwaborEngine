@@ -11,7 +11,7 @@ import (
 //go:embed shaders/stroke.wgsl
 var strokeVertWGSL string
 
-//go:embed shaders/stroke_frag.wgsl
+//go:embed shaders/fragment.wgsl
 var strokeFragWGSL string
 
 // StrokePipeline renders screen-space-width polylines via vertex-shader

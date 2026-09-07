@@ -11,7 +11,7 @@ import (
 //go:embed shaders/instanced.wgsl
 var instancedVertWGSL string
 
-//go:embed shaders/instanced_frag.wgsl
+//go:embed shaders/fragment.wgsl
 var instancedFragWGSL string
 
 // CameraUniform is the GPU-side camera data. Must be 80 bytes to match WGSL
