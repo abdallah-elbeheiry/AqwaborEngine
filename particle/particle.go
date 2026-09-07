@@ -114,8 +114,20 @@ func (e *Emitter) Update(dt float32) {
 	}
 }
 
-// WriteInstances writes all alive particles into the instance buffer.
+// WriteInstances packs all alive particles into a contiguous slice and
+// uploads them via WriteAll (one range, one upload).
 func (e *Emitter) WriteInstances() {
+	n := 0
+	for i := range e.particles {
+		if e.particles[i].Active {
+			n++
+		}
+	}
+	if n == 0 {
+		e.buf.SetCount(0)
+		return
+	}
+	buf := render.InstanceSlice(e.buf, n)
 	idx := 0
 	for i := range e.particles {
 		p := &e.particles[i]
@@ -124,15 +136,16 @@ func (e *Emitter) WriteInstances() {
 		}
 		t := 1 - p.Life/p.MaxLife
 		color := lerpColor(e.cfg.ColorStart, e.cfg.ColorEnd, t)
-		e.buf.Write(idx, &render.InstanceData{
+		buf[idx] = render.InstanceData{
 			Position: p.Pos,
 			Scale:    [2]float32{p.Scale, p.Scale},
 			Rotation: p.Rotate,
 			Color:    color,
 			Layer:    0,
-		})
+		}
 		idx++
 	}
+	e.buf.WriteAll(buf[:idx])
 }
 
 // Flush uploads dirty instance data to the GPU.
