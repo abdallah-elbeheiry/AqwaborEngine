@@ -10,6 +10,7 @@ struct InstanceData {
     color:    vec4<f32>,
     uvOffset: vec2<f32>,
     layer:    f32,
+    pad:      f32, // trailing pad: WGSL storage stride is 64 bytes, must match Go
 };
 
 struct Camera {

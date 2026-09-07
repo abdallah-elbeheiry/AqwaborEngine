@@ -31,9 +31,13 @@ type Mesh struct {
 }
 
 // NewMesh creates a Mesh from raw vertex and index data.
-func NewMesh(dev *wgpu.Device, vertices []MeshVertex, indices []uint32) *Mesh {
+// queue is used for the initial upload; if nil, dev.Queue() is used.
+func NewMesh(dev *wgpu.Device, queue *wgpu.Queue, vertices []MeshVertex, indices []uint32) *Mesh {
 	if len(vertices) == 0 || len(indices) == 0 {
 		panic("mesh requires at least one vertex and one index")
+	}
+	if queue == nil {
+		queue = dev.Queue()
 	}
 
 	vertBuf, err := dev.CreateBuffer(&wgpu.BufferDescriptor{
@@ -45,7 +49,7 @@ func NewMesh(dev *wgpu.Device, vertices []MeshVertex, indices []uint32) *Mesh {
 		panic(err)
 	}
 	vertBytes := vertexBytes(vertices)
-	if err := dev.Queue().WriteBuffer(vertBuf, 0, vertBytes); err != nil {
+	if err := queue.WriteBuffer(vertBuf, 0, vertBytes); err != nil {
 		panic(err)
 	}
 
@@ -58,7 +62,7 @@ func NewMesh(dev *wgpu.Device, vertices []MeshVertex, indices []uint32) *Mesh {
 		panic(err)
 	}
 	idxBytes := indexBytes(indices)
-	if err := dev.Queue().WriteBuffer(idxBuf, 0, idxBytes); err != nil {
+	if err := queue.WriteBuffer(idxBuf, 0, idxBytes); err != nil {
 		panic(err)
 	}
 
@@ -70,7 +74,8 @@ func NewMesh(dev *wgpu.Device, vertices []MeshVertex, indices []uint32) *Mesh {
 }
 
 // NewUnitQuad creates a 1×1 quad centred at the origin (vertices -0.5 to +0.5).
-func NewUnitQuad(dev *wgpu.Device) *Mesh {
+// queue may be nil (falls back to dev.Queue()).
+func NewUnitQuad(dev *wgpu.Device, queue *wgpu.Queue) *Mesh {
 	vertices := []MeshVertex{
 		{-0.5, -0.5, 1, 1, 1, 1},
 		{0.5, -0.5, 1, 1, 1, 1},
@@ -78,7 +83,7 @@ func NewUnitQuad(dev *wgpu.Device) *Mesh {
 		{-0.5, 0.5, 1, 1, 1, 1},
 	}
 	indices := []uint32{0, 1, 2, 0, 2, 3}
-	return NewMesh(dev, vertices, indices)
+	return NewMesh(dev, queue, vertices, indices)
 }
 
 // Release releases GPU resources.

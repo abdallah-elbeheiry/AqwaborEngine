@@ -2,6 +2,7 @@
 package render
 
 import (
+	"sort"
 	"unsafe"
 
 	"github.com/gogpu/gputypes"
@@ -19,12 +20,13 @@ type InstanceBuffer struct {
 }
 
 // NewInstanceBuffer creates a new instance buffer with the given capacity.
+// The buffer carries Storage usage so the compute cull pass can read it.
 func NewInstanceBuffer(dev *wgpu.Device, capacity int) *InstanceBuffer {
 	size := uint64(capacity * instanceDataSize)
 	buf, err := dev.CreateBuffer(&wgpu.BufferDescriptor{
 		Label: "instance buffer",
 		Size:  size,
-		Usage: gputypes.BufferUsageVertex | gputypes.BufferUsageCopyDst,
+		Usage: gputypes.BufferUsageVertex | gputypes.BufferUsageCopyDst | gputypes.BufferUsageStorage,
 	})
 	if err != nil {
 		panic(err)
@@ -39,6 +41,9 @@ func NewInstanceBuffer(dev *wgpu.Device, capacity int) *InstanceBuffer {
 
 // Write copies instance data at the given index and marks the range dirty.
 // Call once per instance per frame (only for changed instances).
+// Note: Write always marks dirty even if the value is unchanged. A frame
+// that rewrites every instance degenerates to one full upload; callers with
+// dense updates should just write all instances and let Flush coalesce.
 func (ib *InstanceBuffer) Write(index int, data *InstanceData) {
 	if index < 0 || index >= ib.capacity {
 		panic("instance index out of bounds")
@@ -56,13 +61,34 @@ func (ib *InstanceBuffer) markDirty(start, end int) {
 }
 
 // Flush uploads all dirty ranges to the GPU buffer.
-// Must be called once per frame before drawing.
+// Must be called once per frame before drawing (DrawInstanced does this
+// automatically). When dirty writes are dense, ranges are coalesced into a
+// single span upload instead of many small WriteBuffers.
 func (ib *InstanceBuffer) Flush(queue *wgpu.Queue) {
 	if len(ib.dirtyRanges) == 0 {
 		return
 	}
 
 	merged := mergeRanges(ib.dirtyRanges)
+
+	// Coalesce to one span upload when dense: if the span covers mostly
+	// dirty instances, one WriteBuffer beats many small ones.
+	if len(merged) > 1 {
+		minStart, maxEnd, dirty := merged[0][0], merged[0][1], 0
+		for _, r := range merged {
+			if r[0] < minStart {
+				minStart = r[0]
+			}
+			if r[1] > maxEnd {
+				maxEnd = r[1]
+			}
+			dirty += r[1] - r[0]
+		}
+		span := maxEnd - minStart
+		if span > 0 && (len(merged) > 8 || dirty*2 >= span) {
+			merged = [][2]int{{minStart, maxEnd}}
+		}
+	}
 
 	for _, r := range merged {
 		start, end := r[0], r[1]
@@ -78,32 +104,26 @@ func (ib *InstanceBuffer) Flush(queue *wgpu.Queue) {
 }
 
 // mergeRanges merges overlapping and adjacent ranges.
+// It sorts in place with sort.Slice (O(n log n)) and merges into the same
+// backing array to avoid allocating on every flush.
 func mergeRanges(ranges [][2]int) [][2]int {
 	if len(ranges) == 0 {
 		return nil
 	}
-	// Sort by start
-	for i := 0; i < len(ranges)-1; i++ {
-		for j := i + 1; j < len(ranges); j++ {
-			if ranges[i][0] > ranges[j][0] {
-				ranges[i], ranges[j] = ranges[j], ranges[i]
-			}
-		}
-	}
+	sort.Slice(ranges, func(i, j int) bool { return ranges[i][0] < ranges[j][0] })
 
-	merged := make([][2]int, 0, len(ranges))
-	merged = append(merged, ranges[0])
+	out := ranges[:1]
 	for _, r := range ranges[1:] {
-		last := &merged[len(merged)-1]
+		last := &out[len(out)-1]
 		if r[0] <= last[1] {
 			if r[1] > last[1] {
 				last[1] = r[1]
 			}
 		} else {
-			merged = append(merged, r)
+			out = append(out, r)
 		}
 	}
-	return merged
+	return out
 }
 
 // Reset clears the instance count and dirty ranges for the next frame.

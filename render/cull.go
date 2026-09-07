@@ -33,8 +33,15 @@ type CullParams struct {
 const cullParamsSize = 24
 
 // CullPipeline manages GPU compute culling and indirect draw support.
+//
+// Ordering contract: the compute pass that writes outputBuf/indirectBuf must
+// be encoded (and submitted) before the render pass that reads them. WebGPU
+// inserts the required memory barriers between the compute and render passes
+// as long as EncodeDispatch happens-before the DrawInstancedIndirect call on
+// the same queue submission order.
 type CullPipeline struct {
 	dev          *wgpu.Device
+	queue        *wgpu.Queue
 	pipe         *wgpu.ComputePipeline
 	bgl          *wgpu.BindGroupLayout
 	pl           *wgpu.PipelineLayout
@@ -42,11 +49,21 @@ type CullPipeline struct {
 	outputBuf    *wgpu.Buffer
 	paramsBuf    *wgpu.Buffer
 	maxInstances int
+
+	// Cached bind group: rebuilt only when the input or camera buffer
+	// identity changes (avoids a CreateBindGroup per dispatch).
+	cachedBG     *wgpu.BindGroup
+	cachedInput  *wgpu.Buffer
+	cachedCamera *wgpu.Buffer
 }
 
 // NewCullPipeline creates the compute cull pipeline and GPU buffers.
-func NewCullPipeline(dev *wgpu.Device, maxInstances int) *CullPipeline {
-	cp := &CullPipeline{dev: dev, maxInstances: maxInstances}
+// queue is retained for params uploads; if nil, dev.Queue() is used.
+func NewCullPipeline(dev *wgpu.Device, queue *wgpu.Queue, maxInstances int) *CullPipeline {
+	if queue == nil {
+		queue = dev.Queue()
+	}
+	cp := &CullPipeline{dev: dev, queue: queue, maxInstances: maxInstances}
 
 	shader, err := dev.CreateShaderModule(&wgpu.ShaderModuleDescriptor{
 		Label: "cull compute",
@@ -126,16 +143,18 @@ func NewCullPipeline(dev *wgpu.Device, maxInstances int) *CullPipeline {
 
 // ResetIndirect clears the instance count in the indirect command buffer.
 // Must be called before each cull dispatch (the compute shader atomically adds to it).
-func (cp *CullPipeline) ResetIndirect(queue *wgpu.Queue) {
+// indexCount is the mesh index count (e.g. 6 for a unit quad); FirstInstance
+// is 0 because the shader compacts survivors into outputBuf from slot 0.
+func (cp *CullPipeline) ResetIndirect(indexCount uint32) {
 	cmd := IndirectCmd{
-		IndexCount:    6,
+		IndexCount:    indexCount,
 		InstanceCount: 0,
 		FirstIndex:    0,
 		BaseVertex:    0,
 		FirstInstance: 0,
 	}
 	src := unsafe.Slice((*byte)(unsafe.Pointer(&cmd)), indirectCmdSize)
-	queue.WriteBuffer(cp.indirectBuf, 0, src)
+	cp.queue.WriteBuffer(cp.indirectBuf, 0, src)
 }
 
 // EncodeDispatch records the compute cull pass into the command encoder.
@@ -155,9 +174,32 @@ func (cp *CullPipeline) EncodeDispatch(
 		MaxBounds:     maxBounds,
 	}
 	src := unsafe.Slice((*byte)(unsafe.Pointer(&params)), cullParamsSize)
-	cp.dev.Queue().WriteBuffer(cp.paramsBuf, 0, src)
+	cp.queue.WriteBuffer(cp.paramsBuf, 0, src)
 
-	// Create a fresh bind group (cheap, no allocation in GPU terms)
+	// Reuse the cached bind group unless a buffer identity changed.
+	bg := cp.bindGroupFor(inputBuf, cameraBuf)
+
+	pass, err := enc.BeginComputePass(&wgpu.ComputePassDescriptor{Label: "cull"})
+	if err != nil {
+		return
+	}
+	pass.SetPipeline(cp.pipe)
+	pass.SetBindGroup(0, bg, nil)
+	workgroups := (instanceCount + 63) / 64
+	pass.Dispatch(uint32(workgroups), 1, 1)
+	pass.End()
+}
+
+// bindGroupFor returns the cached bind group, rebuilding it only when the
+// input or camera buffer identity changes.
+func (cp *CullPipeline) bindGroupFor(inputBuf, cameraBuf *wgpu.Buffer) *wgpu.BindGroup {
+	if cp.cachedBG != nil && cp.cachedInput == inputBuf && cp.cachedCamera == cameraBuf {
+		return cp.cachedBG
+	}
+	if cp.cachedBG != nil {
+		cp.cachedBG.Release()
+		cp.cachedBG = nil
+	}
 	bg, err := cp.dev.CreateBindGroup(&wgpu.BindGroupDescriptor{
 		Label:  "cull bg",
 		Layout: cp.bgl,
@@ -170,19 +212,12 @@ func (cp *CullPipeline) EncodeDispatch(
 		},
 	})
 	if err != nil {
-		return
+		return nil
 	}
-	defer bg.Release()
-
-	pass, err := enc.BeginComputePass(&wgpu.ComputePassDescriptor{Label: "cull"})
-	if err != nil {
-		return
-	}
-	pass.SetPipeline(cp.pipe)
-	pass.SetBindGroup(0, bg, nil)
-	workgroups := (instanceCount + 63) / 64
-	pass.Dispatch(uint32(workgroups), 1, 1)
-	pass.End()
+	cp.cachedBG = bg
+	cp.cachedInput = inputBuf
+	cp.cachedCamera = cameraBuf
+	return bg
 }
 
 // IndirectBuffer returns the indirect command buffer for DrawIndexedIndirect.
@@ -197,6 +232,10 @@ func (cp *CullPipeline) OutputBuffer() *wgpu.Buffer {
 
 // Release releases GPU resources.
 func (cp *CullPipeline) Release() {
+	if cp.cachedBG != nil {
+		cp.cachedBG.Release()
+		cp.cachedBG = nil
+	}
 	if cp.pipe != nil {
 		cp.pipe.Release()
 	}

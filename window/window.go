@@ -131,6 +131,9 @@ func (w *Window) retainBuffer(b *wgpu.Buffer) {
 	w.genBufs[len(w.genBufs)-1] = append(cur, b)
 }
 
+// Draw uploads vertices to a fresh buffer and draws them in their own pass.
+// Deprecated: prefer render.Renderer.UploadVertices + DrawVertices (persistent
+// buffer, no per-call allocation). Kept for legacy callers only.
 func (w *Window) Draw(dc *gogpu.Context, vertices []Vertex) error {
 	return w.drawVertices(dc, vertices)
 }
