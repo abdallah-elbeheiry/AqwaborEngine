@@ -2,11 +2,6 @@ package main
 
 import (
 	"flag"
-	"image"
-	"image/color"
-	"image/png"
-	"math"
-	"os"
 	"sync"
 	"time"
 
@@ -31,7 +26,7 @@ func main() {
 
 	// Open the audio context once and keep it alive for the whole program so the
 	// song keeps playing while the demo runs.
-	snd, err := sound.New(sound.WithVolume(0))
+	snd, err := sound.New(sound.WithVolume(0.5))
 	if err != nil {
 		logx.Errorf("sound init (no audio device?): %v", err)
 	} else {
@@ -47,125 +42,16 @@ func main() {
 		}
 	}
 
-	mode := flag.String("mode", "world", "demo mode: window (sprites + GPU cull), world (vector map), ui (widget shell)")
+	mode := flag.String("mode", "world", "demo mode: world (vector map), ui (widget shell + image)")
 	flag.Parse()
 
 	switch *mode {
-	case "window":
-		runWindowDemo()
-	case "world":
-		runWorldDemo()
-	default:
+	case "ui":
 		runUIDemo()
+	default:
+		runWorldDemo()
 	}
 }
-
-// ---------------------------------------------------------------------------
-// MapView + Camera test harness
-//
-// Exercises every feature of the map widget:
-//   - initial overview (whole map centered on first layout)
-//   - left-drag panning (gesture DragRecognizer)
-//   - mouse-wheel zoom, toward the cursor (ZoomAt)
-//   - bounds clamping (drag past the edge keeps the map in view)
-//   - world<->local coordinate conversion (live cursor HUD)
-//   - ZoomRange limits
-//   - Row composition with a side panel of live controls
-// ---------------------------------------------------------------------------
-
-var (
-	demoThemes   = []*ui.Theme{ui.LightPurple, ui.DarkPurple, ui.Light, ui.Dark, ui.LightBlue, ui.DarkBlue}
-	demoThemeIdx int
-)
-
-func cycleTheme(app *ui.App) {
-	demoThemeIdx = (demoThemeIdx + 1) % len(demoThemes)
-	app.SetTheme(demoThemes[demoThemeIdx])
-}
-
-// genMapPNG draws a 2400x1600 procedural "world" (sea, lat/long grid, a few
-// colored land regions, a center cross) and writes it as a PNG so it can be
-// loaded through the normal ImageManager path.
-func genMapPNG(path string, w, h int) error {
-	img := image.NewRGBA(image.Rect(0, 0, w, h))
-
-	sea := color.RGBA{30, 90, 140, 255}
-	for y := range h {
-		for x := range w {
-			img.Set(x, y, sea)
-		}
-	}
-
-	grid := color.RGBA{60, 130, 180, 255}
-	for x := 0; x <= w; x += 200 {
-		for xx := 0; xx < 2 && x+xx < w; xx++ {
-			for y := range h {
-				img.Set(x+xx, y, grid)
-			}
-		}
-	}
-	for y := 0; y <= h; y += 200 {
-		for yy := 0; yy < 2 && y+yy < h; yy++ {
-			for x := range w {
-				img.Set(x, y+yy, grid)
-			}
-		}
-	}
-
-	regions := []struct {
-		x, y, w, h int
-		c          color.RGBA
-	}{
-		{200, 200, 500, 400, color.RGBA{90, 160, 80, 255}},
-		{800, 150, 600, 500, color.RGBA{200, 180, 90, 255}},
-		{1500, 300, 600, 700, color.RGBA{160, 100, 160, 255}},
-		{300, 900, 700, 500, color.RGBA{200, 120, 80, 255}},
-		{1200, 1000, 800, 400, color.RGBA{80, 160, 160, 255}},
-	}
-	for _, r := range regions {
-		fillRect(img, r.x, r.y, r.w, r.h, r.c)
-		strokeRect(img, r.x, r.y, r.w, r.h, color.RGBA{20, 20, 20, 255})
-	}
-
-	cx, cy := w/2, h/2
-	for x := cx - 40; x <= cx+40; x++ {
-		img.Set(x, cy, color.RGBA{255, 255, 255, 255})
-	}
-	for y := cy - 40; y <= cy+40; y++ {
-		img.Set(cx, y, color.RGBA{255, 255, 255, 255})
-	}
-	strokeRect(img, 0, 0, w, h, color.RGBA{10, 10, 10, 255})
-
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	return png.Encode(f, img)
-}
-
-func fillRect(img *image.RGBA, x, y, w, h int, c color.RGBA) {
-	for yy := y; yy < y+h; yy++ {
-		for xx := x; xx < x+w; xx++ {
-			img.Set(xx, yy, c)
-		}
-	}
-}
-
-func strokeRect(img *image.RGBA, x, y, w, h int, c color.RGBA) {
-	for xx := x; xx < x+w; xx++ {
-		img.Set(xx, y, c)
-		img.Set(xx, y+h-1, c)
-	}
-	for yy := y; yy < y+h; yy++ {
-		img.Set(x, yy, c)
-		img.Set(x+w-1, yy, c)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Original UI shell demo
-// ---------------------------------------------------------------------------
 
 func runUIDemo() {
 	app, err := ui.New(ui.Config{
@@ -235,109 +121,6 @@ func runUIDemo() {
 		if ok := app.Images().TryRelease(fox); !ok {
 			logx.Warn("fox asset still in use at shutdown")
 		}
-	}
-}
-
-func runWindowDemo() {
-	win, err := window.NewWindow(window.WindowConfig{
-		Title:     "Aqwabor Engine — Sprites + GPU Cull",
-		W:         1280,
-		H:         720,
-		Resizable: true,
-	})
-	if err != nil {
-		logx.Fatalf("failed to create window: %v", err)
-	}
-	defer win.Close()
-	logx.Info("window ready", "title", "Aqwabor Engine — Sprites + GPU Cull", "w", 1280, "h", 720)
-
-	s := schedulers.NewScheduler()
-	s.Run(func(st schedulers.TickState) {}, 2.0)
-	s.Start()
-	defer s.Stop()
-
-	var gfx *render.GPU
-	var quad *render.Mesh
-	var visibleInstances *render.InstanceBuffer
-	var culledInstances *render.InstanceBuffer
-
-	// Viewport half-extents for the orthographic projection.
-	vpHalfW := float32(640)
-	vpHalfH := float32(360)
-
-	if err := win.Run(func(dc *gogpu.Context) {
-		if gfx == nil {
-			gfx = render.New(win.DeviceProvider())
-			quad = render.NewUnitQuad(gfx.Device(), gfx.Queue())
-
-			// --- Visible sprites: several colored quads spread across the screen ---
-			visibleInstances = render.NewInstanceBuffer(gfx.Device(), 16)
-			visibleInstances.WriteAll([]render.InstanceData{
-				{Position: [2]float32{-300, -100}, Scale: [2]float32{80, 80}, Color: [4]float32{1, 0.2, 0.2, 1}}, // red
-				{Position: [2]float32{-150, 50}, Scale: [2]float32{120, 60}, Color: [4]float32{0.2, 1, 0.2, 1}},  // green
-				{Position: [2]float32{50, -150}, Scale: [2]float32{60, 100}, Color: [4]float32{0.2, 0.2, 1, 1}},  // blue
-				{Position: [2]float32{200, 80}, Scale: [2]float32{100, 100}, Color: [4]float32{1, 1, 0.2, 1}},    // yellow
-				{Position: [2]float32{-50, -200}, Scale: [2]float32{150, 40}, Color: [4]float32{1, 0.5, 0, 1}},   // orange
-				{Position: [2]float32{350, -50}, Scale: [2]float32{70, 70}, Color: [4]float32{0.5, 0, 1, 1}},     // purple
-				{Position: [2]float32{-400, 200}, Scale: [2]float32{90, 50}, Color: [4]float32{0, 1, 1, 1}},      // cyan
-				{Position: [2]float32{100, 250}, Scale: [2]float32{110, 30}, Color: [4]float32{1, 0, 0.5, 1}},    // pink
-			})
-
-			// --- Culled batch: many instances, most off-screen ---
-			const totalCulled = 256
-			culledInstances = render.NewInstanceBuffer(gfx.Device(), totalCulled)
-			cullData := make([]render.InstanceData, totalCulled)
-			for i := range cullData {
-				// Scatter instances in a wide ring; many will be outside the viewport.
-				angle := float32(i) * 0.245
-				radius := float32(200 + i*3)
-				x := float32(math.Cos(float64(angle))) * radius
-				y := float32(math.Sin(float64(angle))) * radius
-				cullData[i] = render.InstanceData{
-					Position: [2]float32{x, y},
-					Scale:    [2]float32{12, 12},
-					Color:    [4]float32{float32(i) / float32(totalCulled), 0.6, 1.0 - float32(i)/float32(totalCulled), 0.9},
-				}
-			}
-			culledInstances.WriteAll(cullData)
-
-			logx.Info("sprites initialized",
-				"visible", 8,
-				"culled_batch", totalCulled)
-		}
-
-		// Ortho: world [-vpHalfW, vpHalfW] -> NDC [-1,1], Y flipped.
-		sx := float32(1.0 / vpHalfW)
-		sy := float32(1.0 / vpHalfH)
-		vp := [16]float32{
-			sx, 0, 0, 0,
-			0, -sy, 0, 0,
-			0, 0, 1, 0,
-			0, 0, 0, 1,
-		}
-		gfx.SetCamera(vp, 1280, 720)
-
-		gfx.Begin(dc, render.Clear{R: 0.08, G: 0.08, B: 0.12, A: 1})
-
-		// Draw visible sprites (direct path).
-		gfx.DrawInstanced(quad, visibleInstances)
-
-		// Draw culled batch (GPU compute cull + indirect draw).
-		gfx.DrawSpritesCulled(quad, culledInstances, render.ViewBounds{
-			MinX: -vpHalfW, MinY: -vpHalfH,
-			MaxX: vpHalfW, MaxY: vpHalfH,
-		})
-
-		gfx.End()
-
-		stats := gfx.Stats()
-		logx.Trace("frame",
-			"draws", stats.DrawCalls,
-			"instances", stats.Instances,
-			"tris", stats.Triangles,
-			"culled_submitted", culledInstances.Count())
-	}); err != nil {
-		logx.Fatalf("window run failed: %v", err)
 	}
 }
 
@@ -419,7 +202,7 @@ func runWorldDemo() {
 	var gfx *render.GPU
 	if err := win.Run(func(dc *gogpu.Context) {
 		now := time.Now()
-		dt := float64(now.Sub(lastFrame).Seconds())
+		dt := now.Sub(lastFrame).Seconds()
 		lastFrame = now
 
 		mgr.Update(dt)
@@ -448,7 +231,13 @@ func runWorldDemo() {
 
 		rend.SetViewport(vp)
 
-		_ = rend.Draw(dc)
+		vpMat := render.ComputeViewProj(cam, vp, float32(world.Scale))
+		gfx.SetCamera(vpMat, vp.Width, vp.Height)
+
+		bg := world.Background
+		gfx.Begin(dc, render.Clear{R: bg.R, G: bg.G, B: bg.B, A: bg.A})
+		rend.Draw()
+		gfx.End()
 	}); err != nil {
 		logx.Fatalf("window run failed: %v", err)
 	}

@@ -14,7 +14,8 @@ var mapWGSL string
 //go:embed shaders/fragment.wgsl
 var mapFragWGSL string
 
-// MapPipeline renders pre-built map geometry with a camera uniform.
+// MapPipeline renders pre-built map geometry with the shared camera uniform.
+// Uses the same 80-byte CameraUniform as the sprite and stroke pipelines.
 // Positions are int32 world-space coords; the viewProj matrix bakes in
 // the scale divisor so the shader just multiplies.
 type MapPipeline struct {
@@ -120,10 +121,14 @@ func NewMapPipeline(dev *wgpu.Device, format gputypes.TextureFormat) *MapPipelin
 	return p
 }
 
-// UpdateCamera writes the camera view-projection matrix to the GPU.
-// viewProj should have the world-scale baked in (i.e. positions are raw int32).
-func (p *MapPipeline) UpdateCamera(queue *wgpu.Queue, viewProj [16]float32) {
-	src := unsafe.Slice((*byte)(unsafe.Pointer(&viewProj[0])), cameraUniformSize)
+// UpdateCamera writes the shared camera uniform (viewProj + viewport) to the GPU.
+// Matches the same 80-byte layout used by the sprite and stroke pipelines.
+func (p *MapPipeline) UpdateCamera(queue *wgpu.Queue, viewProj [16]float32, viewportW, viewportH float32) {
+	u := CameraUniform{
+		ViewProj: viewProj,
+		Viewport: [2]float32{viewportW, viewportH},
+	}
+	src := unsafe.Slice((*byte)(unsafe.Pointer(&u)), cameraUniformSize)
 	queue.WriteBuffer(p.cameraBuf, 0, src)
 }
 

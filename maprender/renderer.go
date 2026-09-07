@@ -9,7 +9,6 @@ import (
 	"github.com/abdallah-elbeheiry/AqwaborEngine/logx"
 	"github.com/abdallah-elbeheiry/AqwaborEngine/mapdata"
 	"github.com/abdallah-elbeheiry/AqwaborEngine/render"
-	"github.com/gogpu/gogpu"
 	"github.com/gogpu/ui/geometry"
 )
 
@@ -69,6 +68,7 @@ func (r *Renderer) SetRenderer(ren *render.Renderer) {
 	}
 
 	r.mapPipe = render.NewMapPipeline(ren.Device(), ren.SurfaceFormat())
+	ren.SetMapPipeline(r.mapPipe)
 	r.buildGPUMesh()
 }
 
@@ -156,25 +156,16 @@ func (r *Renderer) SetViewport(vp geometry.Size) { r.viewport = vp }
 func (r *Renderer) SetCamera(cam *camera.Camera) { r.cam = cam }
 func (r *Renderer) SetStrokeWidth(px float32)    { r.strokeWidthPx = px }
 
-func (r *Renderer) Draw(dc *gogpu.Context) error {
+func (r *Renderer) Draw() {
 	if r.world == nil || r.cam == nil || r.ren == nil || r.mapMesh == nil || r.mapPipe == nil {
-		return nil
+		return
 	}
 	if r.viewport.Width <= 0 || r.viewport.Height <= 0 {
-		return nil
+		return
 	}
 
 	zoom := r.cam.Zoom()
 	r.stats = Stats{MetresPerPx: metresPerDegree / float64(zoom)}
-
-	vp := render.ComputeViewProj(r.cam, r.viewport, float32(r.world.Scale))
-	r.mapPipe.UpdateCamera(r.ren.Queue(), vp)
-	r.ren.UpdateStrokeCamera(vp, float32(r.viewport.Width), float32(r.viewport.Height))
-
-	bg := r.world.Background
-	if err := r.ren.ClearAndBeginFrame(dc, bg.R, bg.G, bg.B, bg.A); err != nil {
-		return err
-	}
 
 	// Fills (baked triangle mesh — still needed for filled regions).
 	r.ren.DrawMapMesh(r.mapMesh, r.mapPipe)
@@ -185,7 +176,6 @@ func (r *Renderer) Draw(dc *gogpu.Context) error {
 	}
 
 	r.stats.Triangles = r.ren.Stats().Triangles
-	r.ren.EndFrame()
 
 	if now := time.Now(); now.Sub(r.lastLog) >= r.logEvery {
 		r.lastLog = now
@@ -193,6 +183,4 @@ func (r *Renderer) Draw(dc *gogpu.Context) error {
 			"tris", r.stats.Triangles,
 			"m/px", int(r.stats.MetresPerPx))
 	}
-
-	return nil
 }

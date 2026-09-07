@@ -3,11 +3,13 @@
 // The high-level entry point is GPU, which wraps all pipeline and buffer
 // management behind a small set of methods:
 //
-//	gfx, _ := render.New(dp)
+//	gfx := render.New(dp)
 //	gfx.Begin(dc, render.Clear{R: 0.05, G: 0.05, B: 0.1, A: 1})
 //	gfx.SetCamera(viewProj, vpW, vpH)
-//	gfx.DrawInstanced(mesh, instances)
-//	gfx.DrawSpritesCulled(mesh, instances, viewBounds)
+//	batch := gfx.Sprites(cap)
+//	batch.SetAll(sprites)
+//	gfx.DrawSprites(batch)
+//	gfx.DrawSpritesCulled(batch, viewBounds)
 //	gfx.DrawStrokes(segments)
 //	gfx.End()
 //
@@ -61,18 +63,27 @@ func (g *GPU) End() {
 
 // --- Camera ---
 
-// SetCamera updates the camera view-projection for instanced and stroke draws.
+// SetCamera updates the camera view-projection for all registered pipelines
+// (sprite, stroke, and map if set via Renderer.SetMapPipeline).
 func (g *GPU) SetCamera(viewProj [16]float32, viewportW, viewportH float32) {
 	g.r.UpdateCamera(viewProj, viewportW, viewportH)
 	g.r.UpdateStrokeCamera(viewProj, viewportW, viewportH)
+	if g.r.mapPipe != nil {
+		g.r.mapPipe.UpdateCamera(g.r.queue, viewProj, viewportW, viewportH)
+	}
 }
 
 // --- Instanced draws ---
 
-// DrawInstanced submits an instanced draw command.
-// Flushes pending dirty ranges automatically.
-func (g *GPU) DrawInstanced(mesh *Mesh, instances *InstanceBuffer) {
-	g.r.DrawInstanced(mesh, instances)
+// Sprites creates a sprite batch with the given capacity.
+// The batch wraps a shared unit quad mesh and an InstanceBuffer.
+func (g *GPU) Sprites(capacity int) *SpriteBatch {
+	return NewSpriteBatch(g.r.Device(), g.r.Queue(), nil, capacity)
+}
+
+// DrawSprites draws all sprites in the batch (no culling).
+func (g *GPU) DrawSprites(batch *SpriteBatch) {
+	g.r.DrawInstanced(batch.meshInternal(), batch.bufferInternal())
 }
 
 // DrawSpritesCulled performs GPU compute culling and draws only visible instances.
@@ -82,7 +93,14 @@ func (g *GPU) DrawInstanced(mesh *Mesh, instances *InstanceBuffer) {
 // The CullPipeline and a shared unit quad mesh are created lazily on the first
 // call. The maxInstances parameter controls the initial capacity; subsequent
 // calls reuse the same pipeline if capacity is sufficient.
-func (g *GPU) DrawSpritesCulled(mesh *Mesh, instances *InstanceBuffer, viewBounds ViewBounds) {
+func (g *GPU) DrawSpritesCulled(batch *SpriteBatch, viewBounds ViewBounds) {
+	instances := batch.bufferInternal()
+	mesh := batch.meshInternal()
+	g.drawSpritesCulled(mesh, instances, viewBounds)
+}
+
+// drawSpritesCulled is the internal implementation shared by batch and raw paths.
+func (g *GPU) drawSpritesCulled(mesh *Mesh, instances *InstanceBuffer, viewBounds ViewBounds) {
 	if instances.Count() == 0 {
 		return
 	}
@@ -138,13 +156,6 @@ func (g *GPU) unitQuad() *Mesh {
 // Flushes pending dirty ranges automatically.
 func (g *GPU) DrawStrokes(segments *StrokeBuffer) {
 	g.r.DrawStrokes(segments)
-}
-
-// --- Static mesh ---
-
-// DrawMapMesh draws pre-built map geometry with a separate map pipeline.
-func (g *GPU) DrawMapMesh(mesh *MapMesh, pipe *MapPipeline) {
-	g.r.DrawMapMesh(mesh, pipe)
 }
 
 // --- Accessors ---
