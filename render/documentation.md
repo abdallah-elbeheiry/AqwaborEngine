@@ -129,22 +129,56 @@ segment into a screen-space quad with miter joins.
 
 ## ECS Integration
 
-Components remain PoD only (no GPU pointers). A small system or demo
-function queries transforms and writes into render batches:
+The render package owns plain-old-data components and extract/draw helpers.
+No GPU pointers live in components — the ECS enforces PoD registration.
+
+### Components
+
+| Component  | Fields                                    | Purpose                    |
+|------------|-------------------------------------------|----------------------------|
+| `Transform`| `X, Y, Rot, SX, SY float32`             | 2D world-space pose        |
+| `Color`    | `R, G, B, A float32`                     | RGBA colour                |
+| `Sprite`   | `Layer float32, UVX, UVY float32, Flags uint32` | Draw order + metadata |
+| `ClearColor`| `R, G, B, A float32`                    | Per-frame background       |
+
+### Registration
 
 ```go
-batch := gfx.Sprites(1024)
-i := 0
-query.ForEach(func(e ecs.Entity) {
-    t := ecs.Get[Transform](e)
-    s := ecs.Get[SpriteStyle](e)
-    batch.Set(i, render.InstanceData{
-        Position: t.Position,
-        Scale:    s.Size,
-        Color:    s.Color,
-    })
-    i++
-})
-batch.SetCount(i)
-gfx.DrawSprites(batch)
+render.MustRegisterECS(w)  // or render.RegisterECS(w) for error return
 ```
+
+Registers all four component types. Call once at startup before spawning.
+
+### Spawning
+
+```go
+e := render.SpawnSprite(w,
+    render.Transform{X: 100, Y: 200, SX: 48, SY: 48},
+    render.Color{R: 1, G: 0, B: 0, A: 1},
+    render.Sprite{Layer: 0},
+)
+```
+
+### Extracting to batch
+
+```go
+batch := gfx.Sprites(1024)  // persistent, created once
+render.ExtractSprites(w, batch)  // fills batch from all Transform+Sprite entities
+```
+
+`ExtractSprites` iterates all entities with `Transform` + `Sprite` (optionally
+`Color`; defaults to white). Zero-scale defaults to 1.
+
+### Drawing
+
+```go
+render.DrawWorld(gfx, batch, dc, clear, viewProj, viewW, viewH, bounds, 64)
+```
+
+Full-frame helper: `SetCamera` → `Begin` → draw (with GPU cull if
+`batch.Count() >= cullThreshold`) → `End`.
+
+### Sharing colours
+
+Use `ecs.Create[Color]` + `ecs.Attach[Color]` to share one colour instance
+across many sprite entities — no per-frame alloc.

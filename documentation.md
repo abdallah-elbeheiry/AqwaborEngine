@@ -35,6 +35,8 @@ aqwabor/
 │   ├── mapstroke.go       — BuildMapStrokes (map polylines → stroke segments)
 │   ├── mapvertex.go       — MapVertex: compact 12-byte int32 + unorm8x4
 │   ├── mappipeline.go     — MapPipeline: camera uniform for map geometry
+│   ├── ecs.go             — ECS components (Transform, Color, Sprite) + ExtractSprites, DrawWorld
+│   ├── ecs_test.go        — tests for ECS registration, spawn, extract
 │   ├── documentation.md   — render API reference
 │   └── shaders/
 │       ├── instanced.wgsl      — instanced vertex shader (mesh + instance + camera)
@@ -44,7 +46,7 @@ aqwabor/
 │       ├── stroke_frag.wgsl    — stroke fragment output
 │       ├── map.wgsl            — map fill vertex shader (int32 coords)
 │       └── fragment.wgsl       — shared fragment passthrough
-├── camera/                — 2D camera with pan/zoom
+├── camera/                — 2D camera with pan/zoom + ECS Camera2D component
 ├── mapdata/               — JSON world data loading
 ├── maprender/             — map data → fill/stroke batches via render APIs
 ├── mapview/               — pannable/zoomable image widget (CPU-scaled)
@@ -61,7 +63,8 @@ aqwabor/
 └── examples/              — test data (fox.png, world_v3.json, song-example.mp3)
 ```
 
-Build: `CGO_ENABLED=0 go run .`
+Build: `CGO_ENABLED=0 go run .`  
+Modes: `-mode=world` (vector map), `-mode=ui` (widget shell), `-mode=window` (ECS sprite demo)
 
 ---
 
@@ -526,6 +529,37 @@ type-switched (string/int/bool/float/error/time.Duration/…) to avoid
 reflection on the hot path. The console theme leans purple/blue while keeping
 severity readable: blue `DEBUG` → light-blue `INFO` → purple `WARN` → red
 `ERROR`/`FATAL`/`PANIC`, with blue field names and a lavender message.
+
+---
+
+## ECS Integration
+
+ECS primitives live **next to the subsystem that owns them**, not in a separate
+`engine/` package. Each package registers its own component types:
+
+```go
+render.MustRegisterECS(w)   // Transform, Color, Sprite, ClearColor
+camera.MustRegisterECS(w)   // Camera2D
+```
+
+Frame loop:
+
+```go
+// startup
+w := ecs.NewWorld()
+render.MustRegisterECS(w)
+camera.MustRegisterECS(w)
+// ... spawn entities ...
+
+// each frame
+cam, _ := ecs.Get[camera.Camera2D](w, camEntity)
+vpMat := camera.ViewProjFrom(*cam, viewW, viewH)
+render.ExtractSprites(w, batch)
+render.DrawWorld(gfx, batch, dc, clear, vpMat, viewW, viewH, bounds, 64)
+```
+
+See [`render/documentation.md`](render/documentation.md) and
+[`camera/documentation.md`](camera/documentation.md) for full API.
 
 ---
 
