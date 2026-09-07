@@ -42,7 +42,7 @@ func main() {
 		}
 	}
 
-	mode := flag.String("mode", "ui", "demo mode: world (vector map), ui (widget shell + image), window (ECS sprite demo)")
+	mode := flag.String("mode", "world", "demo mode: world (vector map), ui (widget shell + image), window (ECS sprite demo)")
 	flag.Parse()
 
 	switch *mode {

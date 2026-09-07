@@ -54,48 +54,60 @@ fn isCulled(pos: vec2<f32>, scale: vec2<f32>) -> bool {
         }
     }
 
-    // Clip-space frustum test: transform AABB corners
-    let corners = array<vec4<f32>, 4>(
-        camera.viewProj * vec4<f32>(pos + vec2<f32>(-halfW, -halfH), 0.0, 1.0),
-        camera.viewProj * vec4<f32>(pos + vec2<f32>( halfW, -halfH), 0.0, 1.0),
-        camera.viewProj * vec4<f32>(pos + vec2<f32>( halfW,  halfH), 0.0, 1.0),
-        camera.viewProj * vec4<f32>(pos + vec2<f32>(-halfW,  halfH), 0.0, 1.0),
-    );
+    // Clip-space frustum test: transform AABB corners individually.
+    // No local arrays — naga emits malformed MSL for dynamically-indexed
+    // local arrays, so each corner is a separate let binding.
+    let c0 = camera.viewProj * vec4<f32>(pos + vec2<f32>(-halfW, -halfH), 0.0, 1.0);
+    let c1 = camera.viewProj * vec4<f32>(pos + vec2<f32>( halfW, -halfH), 0.0, 1.0);
+    let c2 = camera.viewProj * vec4<f32>(pos + vec2<f32>( halfW,  halfH), 0.0, 1.0);
+    let c3 = camera.viewProj * vec4<f32>(pos + vec2<f32>(-halfW,  halfH), 0.0, 1.0);
 
     // Behind camera (all corners have w <= 0)
-    var allBehind = true;
-    for (var i = 0u; i < 4u; i++) {
-        if (corners[i].w > 0.0) {
-            allBehind = false;
-            break;
-        }
+    if (c0.w <= 0.0 && c1.w <= 0.0 && c2.w <= 0.0 && c3.w <= 0.0) {
+        return true;
     }
-    if (allBehind) { return true; }
 
-    // Left/right frustum
     var allLeft = true;
     var allRight = true;
-    for (var i = 0u; i < 4u; i++) {
-        if (corners[i].w > 0.0) {
-            let nx = corners[i].x / corners[i].w;
-            if (nx > -1.0) { allLeft = false; }
-            if (nx <  1.0) { allRight = false; }
-        }
-    }
-    if (allLeft || allRight) { return true; }
-
-    // Top/bottom frustum
     var allBelow = true;
     var allAbove = true;
-    for (var i = 0u; i < 4u; i++) {
-        if (corners[i].w > 0.0) {
-            let ny = corners[i].y / corners[i].w;
-            if (ny > -1.0) { allBelow = false; }
-            if (ny <  1.0) { allAbove = false; }
-        }
-    }
-    if (allBelow || allAbove) { return true; }
 
+    if (c0.w > 0.0) {
+        let nx = c0.x / c0.w;
+        let ny = c0.y / c0.w;
+        if (nx > -1.0) { allLeft = false; }
+        if (nx <  1.0) { allRight = false; }
+        if (ny > -1.0) { allBelow = false; }
+        if (ny <  1.0) { allAbove = false; }
+    }
+    if (c1.w > 0.0) {
+        let nx = c1.x / c1.w;
+        let ny = c1.y / c1.w;
+        if (nx > -1.0) { allLeft = false; }
+        if (nx <  1.0) { allRight = false; }
+        if (ny > -1.0) { allBelow = false; }
+        if (ny <  1.0) { allAbove = false; }
+    }
+    if (c2.w > 0.0) {
+        let nx = c2.x / c2.w;
+        let ny = c2.y / c2.w;
+        if (nx > -1.0) { allLeft = false; }
+        if (nx <  1.0) { allRight = false; }
+        if (ny > -1.0) { allBelow = false; }
+        if (ny <  1.0) { allAbove = false; }
+    }
+    if (c3.w > 0.0) {
+        let nx = c3.x / c3.w;
+        let ny = c3.y / c3.w;
+        if (nx > -1.0) { allLeft = false; }
+        if (nx <  1.0) { allRight = false; }
+        if (ny > -1.0) { allBelow = false; }
+        if (ny <  1.0) { allAbove = false; }
+    }
+
+    if (allLeft || allRight || allBelow || allAbove) {
+        return true;
+    }
     return false;
 }
 
