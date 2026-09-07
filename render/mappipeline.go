@@ -11,6 +11,9 @@ import (
 //go:embed shaders/map.wgsl
 var mapWGSL string
 
+//go:embed shaders/fragment.wgsl
+var mapFragWGSL string
+
 // MapPipeline renders pre-built map geometry with a camera uniform.
 // Positions are int32 world-space coords; the viewProj matrix bakes in
 // the scale divisor so the shader just multiplies.
@@ -38,7 +41,7 @@ func NewMapPipeline(dev *wgpu.Device, format gputypes.TextureFormat) *MapPipelin
 
 	fragMod, err := dev.CreateShaderModule(&wgpu.ShaderModuleDescriptor{
 		Label: "map frag",
-		WGSL:  legacyFragWGSL,
+		WGSL:  mapFragWGSL,
 	})
 	if err != nil {
 		panic(err)

@@ -1,20 +1,11 @@
 package render
 
 import (
-	_ "embed"
-	"unsafe"
-
 	"github.com/abdallah-elbeheiry/AqwaborEngine/logx"
 	"github.com/gogpu/gogpu"
 	"github.com/gogpu/gputypes"
 	"github.com/gogpu/wgpu"
 )
-
-//go:embed shaders/vertex.wgsl
-var legacyVertWGSL string
-
-//go:embed shaders/fragment.wgsl
-var legacyFragWGSL string
 
 var log = logx.With("component", "render")
 
@@ -26,23 +17,17 @@ type DeviceProvider interface {
 }
 
 // Renderer owns the per-frame render pass and all draw pipelines.
-// It replaces the old Window.Draw per-call buffer allocation pattern.
 type Renderer struct {
 	dev    *wgpu.Device
 	queue  *wgpu.Queue
 	format gputypes.TextureFormat
 
 	pass      *wgpu.RenderPassEncoder
+	enc       *wgpu.CommandEncoder // borrowed from gogpu.Context; valid during frame
 	frameOpen bool
 
-	instPipe   *Pipeline            // instanced draws
-	vertPipe   *wgpu.RenderPipeline // legacy vertex draws
-	strokePipe *StrokePipeline      // screen-space-width polylines
-
-	// Reusable vertex buffer for DrawVertices (grown as needed)
-	vertBuf    *wgpu.Buffer
-	vertBufCap int
-	vertCount  uint32
+	instPipe   *Pipeline       // instanced draws
+	strokePipe *StrokePipeline // screen-space-width polylines
 
 	stats FrameStats
 }
@@ -72,66 +57,10 @@ func NewRenderer(dp DeviceProvider) *Renderer {
 	// Stroke pipeline (screen-space-width polylines)
 	r.strokePipe = NewStrokePipeline(dev, format)
 
-	// Legacy vertex pipeline (for variable-topology content)
-	r.vertPipe = r.createVertPipeline(dev, format)
-
 	return r
 }
 
-func (r *Renderer) createVertPipeline(dev *wgpu.Device, format gputypes.TextureFormat) *wgpu.RenderPipeline {
-	vertMod, err := dev.CreateShaderModule(&wgpu.ShaderModuleDescriptor{
-		Label: "vert",
-		WGSL:  legacyVertWGSL,
-	})
-	if err != nil {
-		panic(err)
-	}
-	defer vertMod.Release()
-
-	fragMod, err := dev.CreateShaderModule(&wgpu.ShaderModuleDescriptor{
-		Label: "frag",
-		WGSL:  legacyFragWGSL,
-	})
-	if err != nil {
-		panic(err)
-	}
-	defer fragMod.Release()
-
-	layout, err := dev.CreatePipelineLayout(&wgpu.PipelineLayoutDescriptor{
-		Label:            "vertex pll",
-		BindGroupLayouts: nil,
-	})
-	if err != nil {
-		panic(err)
-	}
-
-	pipe, err := dev.CreateRenderPipeline(&wgpu.RenderPipelineDescriptor{
-		Label:  "vertex pipeline",
-		Layout: layout,
-		Vertex: wgpu.VertexState{
-			Module:     vertMod,
-			EntryPoint: "vs_main",
-			Buffers:    []gputypes.VertexBufferLayout{vertexLayout},
-		},
-		Fragment: &wgpu.FragmentState{
-			Module:     fragMod,
-			EntryPoint: "fs_main",
-			Targets: []gputypes.ColorTargetState{{
-				Format:    format,
-				WriteMask: gputypes.ColorWriteMaskAll,
-			}},
-		},
-		Primitive: gputypes.PrimitiveState{
-			Topology: gputypes.PrimitiveTopologyTriangleList,
-		},
-	})
-	if err != nil {
-		panic(err)
-	}
-	return pipe
-}
-
-// --- Frame lifecycle ---
+// --- Instanced draws ---
 
 // ClearAndBeginFrame begins a render pass that clears the screen.
 func (r *Renderer) ClearAndBeginFrame(dc *gogpu.Context, cr, cg, cb, ca float32) error {
@@ -145,6 +74,7 @@ func (r *Renderer) ClearAndBeginFrame(dc *gogpu.Context, cr, cg, cb, ca float32)
 	}
 
 	r.stats = FrameStats{}
+	r.enc = enc
 
 	pass, err := enc.BeginRenderPass(&wgpu.RenderPassDescriptor{
 		ColorAttachments: []wgpu.RenderPassColorAttachment{{
@@ -175,6 +105,7 @@ func (r *Renderer) BeginFrame(dc *gogpu.Context) error {
 	}
 
 	r.stats = FrameStats{}
+	r.enc = enc
 
 	pass, err := enc.BeginRenderPass(&wgpu.RenderPassDescriptor{
 		ColorAttachments: []wgpu.RenderPassColorAttachment{{
@@ -198,6 +129,7 @@ func (r *Renderer) EndFrame() {
 		r.pass.End()
 		r.pass = nil
 	}
+	r.enc = nil
 	r.frameOpen = false
 }
 
@@ -246,62 +178,7 @@ func (r *Renderer) DrawInstancedIndirect(mesh *Mesh, cull *CullPipeline) {
 	r.stats.DrawCalls++
 }
 
-// --- Variable-topology vertex draws ---
-
-// UploadVertices uploads a vertex list to the GPU buffer.
-// Must be called before the render pass (before ClearAndBeginFrame/BeginFrame).
-func (r *Renderer) UploadVertices(vertices []Vertex) {
-	if len(vertices) == 0 {
-		return
-	}
-	needBytes := uint64(len(vertices) * 24)
-	if r.vertBuf == nil || r.vertBuf.Size() < needBytes {
-		r.growVertBuf(needBytes)
-	}
-	src := unsafe.Slice((*byte)(unsafe.Pointer(&vertices[0])), int(needBytes))
-	r.queue.WriteBuffer(r.vertBuf, 0, src)
-	r.vertCount = uint32(len(vertices))
-}
-
-// DrawVertices draws the previously uploaded vertex data.
-// Must be called inside an active render pass (after ClearAndBeginFrame/BeginFrame).
-func (r *Renderer) DrawVertices() {
-	if r.pass == nil || !r.frameOpen || r.vertCount == 0 {
-		return
-	}
-	r.pass.SetPipeline(r.vertPipe)
-	r.pass.SetVertexBuffer(0, r.vertBuf, 0)
-	r.pass.Draw(r.vertCount, 1, 0, 0)
-	r.stats.DrawCalls++
-	r.stats.Triangles += int(r.vertCount) / 3
-	r.vertCount = 0
-}
-
-func (r *Renderer) growVertBuf(minBytes uint64) {
-	if r.vertBuf != nil {
-		r.vertBuf.Release()
-	}
-	// Double the capacity each time
-	cap := r.vertBufCap * 2
-	if cap < 1024 {
-		cap = 1024
-	}
-	for uint64(cap)*24 < minBytes {
-		cap *= 2
-	}
-	buf, err := r.dev.CreateBuffer(&wgpu.BufferDescriptor{
-		Label: "vertex stream",
-		Size:  uint64(cap) * 24,
-		Usage: gputypes.BufferUsageVertex | gputypes.BufferUsageCopyDst,
-	})
-	if err != nil {
-		panic(err)
-	}
-	r.vertBuf = buf
-	r.vertBufCap = cap
-}
-
-// --- Map mesh draws ---
+// --- Camera ---
 
 // DrawMapMesh draws pre-built map geometry with the map pipeline.
 // Must be called inside an active render pass.
@@ -369,14 +246,16 @@ func (r *Renderer) Queue() *wgpu.Queue                    { return r.queue }
 func (r *Renderer) SurfaceFormat() gputypes.TextureFormat { return r.format }
 func (r *Renderer) Stats() FrameStats                     { return r.stats }
 
+// CommandEncoder returns the frame's command encoder, valid only during the
+// current draw callback. Used by the GPU facade for compute cull dispatch.
+func (r *Renderer) CommandEncoder() *wgpu.CommandEncoder { return r.enc }
+
+// CameraBuffer returns the instanced pipeline's camera uniform buffer.
+// Used by the GPU facade for compute cull binding.
+func (r *Renderer) CameraBuffer() *wgpu.Buffer { return r.instPipe.CameraBuffer() }
+
 // Release releases GPU resources.
 func (r *Renderer) Release() {
 	r.instPipe.Release()
 	r.strokePipe.Release()
-	if r.vertPipe != nil {
-		r.vertPipe.Release()
-	}
-	if r.vertBuf != nil {
-		r.vertBuf.Release()
-	}
 }

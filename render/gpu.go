@@ -7,6 +7,7 @@
 //	gfx.Begin(dc, render.Clear{R: 0.05, G: 0.05, B: 0.1, A: 1})
 //	gfx.SetCamera(viewProj, vpW, vpH)
 //	gfx.DrawInstanced(mesh, instances)
+//	gfx.DrawSpritesCulled(mesh, instances, viewBounds)
 //	gfx.DrawStrokes(segments)
 //	gfx.End()
 //
@@ -24,10 +25,21 @@ type Clear struct {
 	R, G, B, A float32
 }
 
+// ViewBounds defines an axis-aligned bounding box for GPU culling.
+type ViewBounds struct {
+	MinX, MinY float32
+	MaxX, MaxY float32
+}
+
 // GPU is the public facade over the render submission layer.
 // It owns the per-frame render pass, all pipelines, and resource management.
 type GPU struct {
 	r *Renderer
+
+	// Compute cull pipeline, created lazily on first DrawSpritesCulled call.
+	cull     *CullPipeline
+	cullMax  int
+	cullMesh *Mesh // shared unit quad for culled draws
 }
 
 // New creates a GPU facade from a device provider.
@@ -63,9 +75,61 @@ func (g *GPU) DrawInstanced(mesh *Mesh, instances *InstanceBuffer) {
 	g.r.DrawInstanced(mesh, instances)
 }
 
-// DrawInstancedIndirect submits an indirect instanced draw over culled data.
-func (g *GPU) DrawInstancedIndirect(mesh *Mesh, cull *CullPipeline) {
-	g.r.DrawInstancedIndirect(mesh, cull)
+// DrawSpritesCulled performs GPU compute culling and draws only visible instances.
+// Instances outside viewBounds are culled on the GPU via a compute pass, then
+// visible survivors are drawn with DrawIndexedIndirect.
+//
+// The CullPipeline and a shared unit quad mesh are created lazily on the first
+// call. The maxInstances parameter controls the initial capacity; subsequent
+// calls reuse the same pipeline if capacity is sufficient.
+func (g *GPU) DrawSpritesCulled(mesh *Mesh, instances *InstanceBuffer, viewBounds ViewBounds) {
+	if instances.Count() == 0 {
+		return
+	}
+
+	// Lazy-init the cull pipeline.
+	if g.cull == nil || g.cullMax < instances.Count() {
+		if g.cull != nil {
+			g.cull.Release()
+		}
+		maxN := instances.Count()
+		if maxN < 1024 {
+			maxN = 1024
+		}
+		g.cull = NewCullPipeline(g.r.Device(), g.r.Queue(), maxN)
+		g.cullMax = maxN
+	}
+
+	if mesh == nil {
+		mesh = g.unitQuad()
+	}
+
+	// 1. Reset the indirect command buffer (instanceCount = 0).
+	g.cull.ResetIndirect(mesh.IndexCount)
+
+	// 2. Encode the compute cull pass BEFORE the render pass.
+	enc := g.r.CommandEncoder()
+	if enc != nil {
+		g.cull.EncodeDispatch(
+			enc,
+			instances.Buffer(),
+			g.r.CameraBuffer(),
+			instances.Count(),
+			[2]float32{viewBounds.MinX, viewBounds.MinY},
+			[2]float32{viewBounds.MaxX, viewBounds.MaxY},
+		)
+	}
+
+	// 3. Draw with indirect count (survivors from cull pass).
+	g.r.DrawInstancedIndirect(mesh, g.cull)
+}
+
+// unitQuad returns a lazily-created shared unit quad mesh.
+func (g *GPU) unitQuad() *Mesh {
+	if g.cullMesh == nil {
+		g.cullMesh = NewUnitQuad(g.r.Device(), g.r.Queue())
+	}
+	return g.cullMesh
 }
 
 // --- Strokes ---
@@ -81,18 +145,6 @@ func (g *GPU) DrawStrokes(segments *StrokeBuffer) {
 // DrawMapMesh draws pre-built map geometry with a separate map pipeline.
 func (g *GPU) DrawMapMesh(mesh *MapMesh, pipe *MapPipeline) {
 	g.r.DrawMapMesh(mesh, pipe)
-}
-
-// --- Variable-topology vertex draws ---
-
-// UploadVertices uploads vertex data for variable-topology content.
-func (g *GPU) UploadVertices(vertices []Vertex) {
-	g.r.UploadVertices(vertices)
-}
-
-// DrawVertices draws previously uploaded vertex data.
-func (g *GPU) DrawVertices() {
-	g.r.DrawVertices()
 }
 
 // --- Accessors ---
@@ -114,4 +166,14 @@ func (g *GPU) Stats() FrameStats { return g.r.Stats() }
 func (g *GPU) Renderer() *Renderer { return g.r }
 
 // Release releases all GPU resources.
-func (g *GPU) Release() { g.r.Release() }
+func (g *GPU) Release() {
+	if g.cull != nil {
+		g.cull.Release()
+		g.cull = nil
+	}
+	if g.cullMesh != nil {
+		g.cullMesh.Release()
+		g.cullMesh = nil
+	}
+	g.r.Release()
+}
