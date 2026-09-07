@@ -1,4 +1,4 @@
-package render
+package mapview
 
 import (
 	"testing"
@@ -19,7 +19,7 @@ func TestMapViewComposes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mv := MapView(asset)
+	mv := New(asset)
 	row := ui.Row(mv)
 	uitest.LayoutWidget(row, 800, 600)
 	if mv.Bounds().IsEmpty() {
@@ -45,7 +45,7 @@ func TestMapViewDraws(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mv := MapView(asset)
+	mv := New(asset)
 	uitest.LayoutWidget(mv, 400, 300)
 	canvas := uitest.DrawWidgetWithContext(mv, uitest.NewMockContext())
 	if len(canvas.Images) == 0 {

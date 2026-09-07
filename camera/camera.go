@@ -5,7 +5,7 @@
 //
 // It knows only about a position and a scale, and exposes pure coordinate
 // conversions plus pan/zoom operations. It performs no drawing, clipping or
-// input handling; a widget that draws content (such as render.MapView) owns a
+// input handling; a widget that draws content (such as mapview.MapView) owns a
 // Camera and uses it to decide what to draw and where.
 //
 //	position = center of the visible region, in world coordinates

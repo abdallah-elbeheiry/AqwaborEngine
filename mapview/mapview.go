@@ -1,5 +1,4 @@
-// Package render (continued): the MapView widget.
-package render
+package mapview
 
 import (
 	"github.com/abdallah-elbeheiry/AqwaborEngine/camera"
@@ -19,8 +18,8 @@ import (
 // Typical use:
 //
 //	mapImage, _ := app.Images().Load("assets/world.png")
-//	root := ui.Row(sidePanel, render.MapView(mapImage))
-type mapView struct {
+//	root := ui.Row(sidePanel, mapview.New(mapImage))
+type MapView struct {
 	widget.WidgetBase
 
 	asset *ui.ImageAsset
@@ -34,10 +33,10 @@ type mapView struct {
 	initialized bool
 }
 
-// MapView creates a pannable/zoomable map widget for the given asset. The asset
+// New creates a pannable/zoomable map widget for the given asset. The asset
 // must be loaded via ImageManager.Load; the widget never performs I/O.
-func MapView(asset *ui.ImageAsset) *mapView {
-	m := &mapView{
+func New(asset *ui.ImageAsset) *MapView {
+	m := &MapView{
 		asset: asset,
 		cam:   camera.NewCamera(),
 	}
@@ -47,27 +46,27 @@ func MapView(asset *ui.ImageAsset) *mapView {
 }
 
 // ZoomRange overrides the allowed zoom limits for this map.
-func (m *mapView) ZoomRange(min, max float32) *mapView {
+func (m *MapView) ZoomRange(min, max float32) *MapView {
 	m.cam.SetZoomLimits(min, max)
 	return m
 }
 
 // Camera returns the camera driving this view. It is exposed so callers can
 // read or drive the view programmatically (e.g. center on a location).
-func (m *mapView) Camera() *camera.Camera { return m.cam }
+func (m *MapView) Camera() *camera.Camera { return m.cam }
 
 // OnPointer registers a callback invoked with the pointer position over the
 // map, expressed both in widget-local pixels and in world (map) coordinates.
 // It fires on hover and during drag. It is optional and intended for
 // diagnostics/overlays (the coordinate-conversion hook from the design).
-func (m *mapView) OnPointer(fn func(local, world geometry.Point)) *mapView {
+func (m *MapView) OnPointer(fn func(local, world geometry.Point)) *MapView {
 	m.onPointer = fn
 	return m
 }
 
 // Overview re-centers the camera on the map and picks a zoom that shows the
 // whole map (the same initial behavior as first layout).
-func (m *mapView) Overview() *mapView {
+func (m *MapView) Overview() *MapView {
 	if m.asset != nil && !m.asset.IsReleased() {
 		w, h := m.asset.Size()
 		m.cam.Fit(geometry.Sz(float32(w), float32(h)), m.Bounds().Size())
@@ -79,18 +78,18 @@ func (m *mapView) Overview() *mapView {
 // LocalToWorld converts a point in this widget's local pixels to world
 // coordinates (image-pixel space). This is the hook later map content — country
 // hit-testing, unit overlays — will use.
-func (m *mapView) LocalToWorld(p geometry.Point) geometry.Point {
+func (m *MapView) LocalToWorld(p geometry.Point) geometry.Point {
 	return m.cam.LocalToWorld(p, m.Bounds().Size())
 }
 
 // WorldToLocal converts a world point to this widget's local pixels.
-func (m *mapView) WorldToLocal(p geometry.Point) geometry.Point {
+func (m *MapView) WorldToLocal(p geometry.Point) geometry.Point {
 	return m.cam.WorldToLocal(p, m.Bounds().Size())
 }
 
 // Layout fills the allotted space (a viewport wants to be as large as it is
 // given) and, on first layout, establishes an initial overview of the map.
-func (m *mapView) Layout(_ widget.Context, c geometry.Constraints) geometry.Size {
+func (m *MapView) Layout(_ widget.Context, c geometry.Constraints) geometry.Size {
 	natural := geometry.Sz(0, 0)
 	if m.asset != nil && !m.asset.IsReleased() {
 		w, h := m.asset.Size()
@@ -122,7 +121,7 @@ func (m *mapView) Layout(_ widget.Context, c geometry.Constraints) geometry.Size
 
 // Draw clips to its bounds, then draws the visible portion of the map scaled
 // according to the camera.
-func (m *mapView) Draw(_ widget.Context, canvas widget.Canvas) {
+func (m *MapView) Draw(_ widget.Context, canvas widget.Canvas) {
 	if !m.IsVisible() {
 		return
 	}
@@ -146,7 +145,7 @@ func (m *mapView) Draw(_ widget.Context, canvas widget.Canvas) {
 
 // Event handles the mouse wheel to zoom toward the cursor. Pointer drags are
 // handled by the gesture DragRecognizer (see GestureHitTest), not here.
-func (m *mapView) Event(_ widget.Context, e event.Event) bool {
+func (m *MapView) Event(_ widget.Context, e event.Event) bool {
 	switch ev := e.(type) {
 	case *event.WheelEvent:
 		var factor float32
@@ -178,7 +177,7 @@ func (m *mapView) Event(_ widget.Context, e event.Event) bool {
 
 // GestureHitTest reports a pan drag recognizer so the map can be dragged with
 // the left mouse button. MapView is a leaf, so it always claims the pointer.
-func (m *mapView) GestureHitTest(_ geometry.Point) []gesture.Recognizer {
+func (m *MapView) GestureHitTest(_ geometry.Point) []gesture.Recognizer {
 	if m.drag == nil {
 		m.drag = gesture.NewDragRecognizer(gesture.DragConfig{
 			Direction: gesture.DragDirectionPan,
@@ -195,7 +194,7 @@ func (m *mapView) GestureHitTest(_ geometry.Point) []gesture.Recognizer {
 	return []gesture.Recognizer{m.drag}
 }
 
-func (m *mapView) clampCamera() {
+func (m *MapView) clampCamera() {
 	if m.asset == nil || m.asset.IsReleased() {
 		return
 	}
@@ -204,14 +203,14 @@ func (m *mapView) clampCamera() {
 }
 
 // Children: leaf widget.
-func (m *mapView) Children() []widget.Widget { return nil }
+func (m *MapView) Children() []widget.Widget { return nil }
 
 // IsViewportClip tells the dirty-region collector to use this widget's bounds
 // as the dirty region and not recurse into the (potentially huge) content.
-func (m *mapView) IsViewportClip() bool { return true }
+func (m *MapView) IsViewportClip() bool { return true }
 
 // Mount registers the widget as an active user of its asset.
-func (m *mapView) Mount(_ widget.Context) {
+func (m *MapView) Mount(_ widget.Context) {
 	if m.asset != nil {
 		m.asset.Acquire()
 	}
@@ -219,7 +218,7 @@ func (m *mapView) Mount(_ widget.Context) {
 
 // Unmount unregisters the widget, freeing the asset for release when no other
 // users remain.
-func (m *mapView) Unmount() {
+func (m *MapView) Unmount() {
 	if m.asset != nil {
 		m.asset.ReleaseUser()
 	}
