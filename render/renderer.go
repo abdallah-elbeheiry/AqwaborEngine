@@ -35,8 +35,9 @@ type Renderer struct {
 	pass      *wgpu.RenderPassEncoder
 	frameOpen bool
 
-	instPipe *Pipeline            // instanced draws
-	vertPipe *wgpu.RenderPipeline // legacy vertex draws
+	instPipe   *Pipeline            // instanced draws
+	vertPipe   *wgpu.RenderPipeline // legacy vertex draws
+	strokePipe *StrokePipeline      // screen-space-width polylines
 
 	// Reusable vertex buffer for DrawVertices (grown as needed)
 	vertBuf    *wgpu.Buffer
@@ -67,6 +68,9 @@ func NewRenderer(dp DeviceProvider) *Renderer {
 
 	// Instanced pipeline
 	r.instPipe = NewPipeline(dev, format)
+
+	// Stroke pipeline (screen-space-width polylines)
+	r.strokePipe = NewStrokePipeline(dev, format)
 
 	// Legacy vertex pipeline (for variable-topology content)
 	r.vertPipe = r.createVertPipeline(dev, format)
@@ -325,6 +329,39 @@ func (r *Renderer) UpdateCamera(viewProj [16]float32, viewportW, viewportH float
 	r.instPipe.UpdateCamera(r.queue, viewProj, viewportW, viewportH)
 }
 
+// UpdateStrokeCamera updates the camera uniform for stroke draws.
+// The stroke pipeline needs the viewport size for screen-space width
+// calculations, so it maintains a separate camera buffer.
+func (r *Renderer) UpdateStrokeCamera(viewProj [16]float32, viewportW, viewportH float32) {
+	r.strokePipe.UpdateCamera(r.queue, viewProj, viewportW, viewportH)
+}
+
+// --- Stroke draws ---
+
+// DrawStrokes submits an instanced draw for stroke segments.
+// Each segment is expanded into a screen-space quad by the vertex shader.
+// Flushes pending dirty ranges automatically.
+func (r *Renderer) DrawStrokes(segments *StrokeBuffer) {
+	if r.pass == nil || !r.frameOpen {
+		return
+	}
+	if segments.Count() == 0 {
+		return
+	}
+	segments.Flush(r.queue)
+
+	r.pass.SetPipeline(r.strokePipe.Pipeline())
+	r.pass.SetBindGroup(0, r.strokePipe.BindGroup(), nil)
+	r.pass.SetVertexBuffer(0, r.strokePipe.QuadVertexBuffer(), 0)
+	r.pass.SetVertexBuffer(1, segments.Buffer(), 0)
+	r.pass.SetIndexBuffer(r.strokePipe.QuadIndexBuffer(), gputypes.IndexFormatUint16, 0)
+	r.pass.DrawIndexed(6, uint32(segments.Count()), 0, 0, 0)
+
+	r.stats.DrawCalls++
+	r.stats.Instances += segments.Count()
+	r.stats.Triangles += 2 * segments.Count() // 2 triangles per segment quad
+}
+
 // --- Accessors ---
 
 func (r *Renderer) Device() *wgpu.Device                  { return r.dev }
@@ -335,6 +372,7 @@ func (r *Renderer) Stats() FrameStats                     { return r.stats }
 // Release releases GPU resources.
 func (r *Renderer) Release() {
 	r.instPipe.Release()
+	r.strokePipe.Release()
 	if r.vertPipe != nil {
 		r.vertPipe.Release()
 	}

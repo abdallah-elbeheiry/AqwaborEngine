@@ -63,3 +63,55 @@ func TestIndirectCmdSize(t *testing.T) {
 		t.Fatalf("sizeof(CullParams) = %d, want %d", got, cullParamsSize)
 	}
 }
+
+func TestInstanceSlice(t *testing.T) {
+	ib := &InstanceBuffer{
+		cpuData:  make([]InstanceData, 16),
+		capacity: 16,
+	}
+	sl := InstanceSlice(ib, 4)
+	if len(sl) != 4 {
+		t.Fatalf("len = %d, want 4", len(sl))
+	}
+	sl[0] = InstanceData{Layer: 7}
+	if ib.cpuData[0].Layer != 7 {
+		t.Fatal("InstanceSlice is not backed by cpuData")
+	}
+}
+
+func TestWriteAllSetsCountAndRange(t *testing.T) {
+	ib := &InstanceBuffer{
+		cpuData:  make([]InstanceData, 16),
+		capacity: 16,
+	}
+	src := make([]InstanceData, 6)
+	src[5] = InstanceData{Layer: 9}
+	ib.WriteAll(src)
+	if ib.count != 6 {
+		t.Fatalf("count = %d, want 6", ib.count)
+	}
+	if ib.cpuData[5].Layer != 9 {
+		t.Fatal("WriteAll did not copy data")
+	}
+	if len(ib.dirtyRanges) != 1 || ib.dirtyRanges[0] != [2]int{0, 6} {
+		t.Fatalf("dirty = %v, want [0 6]", ib.dirtyRanges)
+	}
+}
+
+func TestWriteAtSetsRange(t *testing.T) {
+	ib := &InstanceBuffer{
+		cpuData:  make([]InstanceData, 16),
+		capacity: 16,
+	}
+	src := []InstanceData{{Layer: 3}, {Layer: 4}}
+	ib.WriteAt(10, src)
+	if ib.count != 12 {
+		t.Fatalf("count = %d, want 12", ib.count)
+	}
+	if ib.cpuData[11].Layer != 4 {
+		t.Fatal("WriteAt did not copy data")
+	}
+	if len(ib.dirtyRanges) != 1 || ib.dirtyRanges[0] != [2]int{10, 12} {
+		t.Fatalf("dirty = %v, want [10 12]", ib.dirtyRanges)
+	}
+}

@@ -31,6 +31,8 @@ type Renderer struct {
 	mapMesh *render.MapMesh
 	mapPipe *render.MapPipeline
 
+	strokeBuf *render.StrokeBuffer // GPU-expanded strokes (new path)
+
 	strokeWidthPx float32
 	minSegmentPx  float32
 
@@ -83,10 +85,21 @@ func (r *Renderer) buildGPUMesh() {
 			MinSegmentPx:  r.minSegmentPx,
 			RefZoom:       r.cam.Zoom(),
 		},
+		true, // fillsOnly: strokes go through BuildMapStrokes + DrawStrokes
 	)
+
+	// Build GPU-expanded stroke segments (replaces baked quad soup).
+	r.strokeBuf = render.BuildMapStrokes(
+		r.ren.Device(),
+		r.world,
+		r.strokeWidthPx,
+		r.minSegmentPx,
+	)
+
 	logx.Info("map GPU mesh built",
-		"vertices", r.mapMesh.Total,
-		"passes", len(r.mapMesh.Passes),
+		"fill_verts", r.mapMesh.Total,
+		"fill_passes", len(r.mapMesh.Passes),
+		"stroke_segs", r.strokeBuf.Count(),
 		"took", time.Since(start).Round(time.Millisecond))
 }
 
@@ -156,12 +169,21 @@ func (r *Renderer) Draw(dc *gogpu.Context) error {
 
 	vp := render.ComputeViewProj(r.cam, r.viewport, float32(r.world.Scale))
 	r.mapPipe.UpdateCamera(r.ren.Queue(), vp)
+	r.ren.UpdateStrokeCamera(vp, float32(r.viewport.Width), float32(r.viewport.Height))
 
 	bg := r.world.Background
 	if err := r.ren.ClearAndBeginFrame(dc, bg.R, bg.G, bg.B, bg.A); err != nil {
 		return err
 	}
+
+	// Fills (baked triangle mesh — still needed for filled regions).
 	r.ren.DrawMapMesh(r.mapMesh, r.mapPipe)
+
+	// Strokes (GPU-expanded centerlines — replaces baked quad soup).
+	if r.strokeBuf != nil && r.strokeBuf.Count() > 0 {
+		r.ren.DrawStrokes(r.strokeBuf)
+	}
+
 	r.stats.Triangles = r.ren.Stats().Triangles
 	r.ren.EndFrame()
 

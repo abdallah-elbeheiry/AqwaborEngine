@@ -31,14 +31,16 @@ type MapMeshConfig struct {
 	RefZoom       float32
 }
 
-// BuildMapMesh triangulates all fills and generates all stroke quads at load time,
-// uploading them to a single GPU vertex buffer. The mesh is static.
+// BuildMapMesh triangulates fills and optionally stroke quads, uploading
+// them to a single GPU vertex buffer.  When fillsOnly is true, only fill
+// geometry is emitted (use with BuildMapStrokes for the stroke path).
 func BuildMapMesh(
 	dev *wgpu.Device,
 	_ *wgpu.Queue,
 	world *mapdata.World,
 	fillTris [][]int32,
 	cfg MapMeshConfig,
+	fillsOnly bool,
 ) *MapMesh {
 	vertices := make([]MapVertex, 0, 1<<20)
 
@@ -60,7 +62,7 @@ func BuildMapMesh(
 			if pass.FillColor != nil && layer.Kind == mapdata.KindRing && fillTris[geomID] != nil {
 				emitMapFill(&vertices, coords, fillTris[geomID], *pass.FillColor)
 			}
-			if pass.StrokeColor != nil {
+			if !fillsOnly && pass.StrokeColor != nil {
 				emitMapStroke(&vertices, coords, layer.Kind == mapdata.KindRing,
 					*pass.StrokeColor, cfg.StrokeWidthPx, cfg.MinSegmentPx, cfg.RefZoom, float32(world.Scale))
 			}
