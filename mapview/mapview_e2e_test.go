@@ -1,4 +1,4 @@
-package render
+package mapview
 
 import (
 	"testing"
@@ -52,7 +52,7 @@ func TestMapViewE2E(t *testing.T) {
 
 	var lastWorld geometry.Point
 	var pointerFired int
-	mv := MapView(asset).ZoomRange(0.5, 8).
+	mv := New(asset).ZoomRange(0.5, 8).
 		OnPointer(func(_, w geometry.Point) { lastWorld = w; pointerFired++ })
 
 	a.SetRoot(mv)
@@ -110,9 +110,6 @@ func TestMapViewE2E(t *testing.T) {
 	}
 
 	// --- pan (drag right moves the map right, center world shifts left) ---
-	// Zoom in first so the map overflows the viewport; at fit zoom the map is
-	// fully visible and ClampToBounds legitimately pins the center (pan is a
-	// no-op there).
 	mv.Camera().SetZoom(2)
 	a.Frame()
 	beforePan := mv.Camera().Position()
@@ -151,7 +148,6 @@ func TestMapViewE2E(t *testing.T) {
 	if pointerFired <= before {
 		t.Fatal("OnPointer callback did not fire on hover")
 	}
-	// last world reported must be consistent with LocalToWorld at the cursor
 	exp := mv.LocalToWorld(cursor)
 	if d := exp.Sub(lastWorld).Length(); d > 1e-2 {
 		t.Fatalf("OnPointer world coord mismatch: reported=%v expected=%v", lastWorld, exp)

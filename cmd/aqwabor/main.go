@@ -2,12 +2,10 @@ package main
 
 import (
 	"flag"
-	"fmt"
 	"image"
 	"image/color"
 	"image/png"
 	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
@@ -54,8 +52,6 @@ func main() {
 	switch *mode {
 	case "window":
 		runWindowDemo()
-	case "map":
-		runMapDemo()
 	case "world":
 		runWorldDemo()
 	default:
@@ -84,108 +80,6 @@ var (
 func cycleTheme(app *ui.App) {
 	demoThemeIdx = (demoThemeIdx + 1) % len(demoThemes)
 	app.SetTheme(demoThemes[demoThemeIdx])
-}
-
-func runMapDemo() {
-	app, err := ui.New(ui.Config{
-		Title:     "Aqwabor — MapView + Camera",
-		W:         1280,
-		H:         720,
-		Resizable: true,
-		Theme:     ui.LightPurple,
-	})
-	if err != nil {
-		logx.Fatalf("ui: %v", err)
-	}
-	defer app.Close()
-
-	// Scheduler keeps the app responsive (mirrors the other demos).
-	s := schedulers.NewScheduler()
-	s.Run(func(st schedulers.TickState) {}, 2.0)
-	s.Start()
-	defer s.Stop()
-
-	// Generate a large procedural map and load it as an asset (no repo binary).
-	mapPath := filepath.Join(os.TempDir(), "aqwabor_map.png")
-	if err := genMapPNG(mapPath, 2400, 1600); err != nil {
-		logx.Fatalf("gen map: %v", err)
-	}
-	asset, err := app.Images().Load(mapPath)
-	if err != nil {
-		logx.Fatalf("load map: %v", err)
-	}
-
-	// Live cursor readout, updated by MapView.OnPointer (local + world coords).
-	var cur struct {
-		mu           sync.Mutex
-		local, world geometry.Point
-	}
-	setCur := func(l, w geometry.Point) {
-		cur.mu.Lock()
-		cur.local, cur.world = l, w
-		cur.mu.Unlock()
-	}
-
-	// The map widget under test.
-	mv := render.MapView(asset).
-		ZoomRange(0.5, 8).
-		OnPointer(setCur)
-
-	// Side panel: live HUD (via LabelFn, re-evaluated each draw) + controls.
-	panel := ui.Column(
-		ui.Label("MapView Demo").FontSize(20).Bold(),
-		ui.Label("Left-drag: pan   •   Wheel: zoom at cursor").FontSize(11),
-
-		ui.LabelFn(func() string {
-			return fmt.Sprintf("Zoom: %.2f   (limits 0.5 … 8)", mv.Camera().Zoom())
-		}),
-		ui.LabelFn(func() string {
-			c := mv.Camera().Position()
-			return fmt.Sprintf("Camera center (world): (%.0f, %.0f)", c.X, c.Y)
-		}),
-		ui.LabelFn(func() string {
-			b := mv.Bounds().Size()
-			c := mv.LocalToWorld(geometry.Pt(b.Width/2, b.Height/2))
-			return fmt.Sprintf("Viewport center -> world: (%.0f, %.0f)", c.X, c.Y)
-		}),
-		ui.LabelFn(func() string {
-			cur.mu.Lock()
-			l := cur.local
-			cur.mu.Unlock()
-			return fmt.Sprintf("Cursor local : (%.0f, %.0f)", l.X, l.Y)
-		}),
-		ui.LabelFn(func() string {
-			cur.mu.Lock()
-			w := cur.world
-			cur.mu.Unlock()
-			return fmt.Sprintf("Cursor world: (%.0f, %.0f)", w.X, w.Y)
-		}),
-
-		ui.Button("Zoom In", func() {
-			mv.Camera().SetZoom(mv.Camera().Zoom() * 1.1)
-			mv.SetNeedsRedraw(true)
-		}),
-		ui.Button("Zoom Out", func() {
-			mv.Camera().SetZoom(mv.Camera().Zoom() / 1.1)
-			mv.SetNeedsRedraw(true)
-		}),
-		ui.Button("Reset View", func() { mv.Overview() }),
-		app.Button("Cycle Theme", func() { cycleTheme(app) }),
-	).Width(300).Gap(8).Padding(12).
-		Background(ui.SurfaceColor(app.Theme())).
-		CrossAlign(ui.CrossStart)
-
-	// Compose: control panel beside the map viewport.
-	app.SetRoot(ui.Row(panel, mv))
-
-	logx.Info("map demo running: drag to pan, scroll to zoom toward cursor")
-	if err := app.Run(); err != nil {
-		logx.Fatalf("ui run: %v", err)
-	}
-
-	if ok := app.Images().TryRelease(asset); !ok {
-		logx.Warn("map asset still in use at shutdown")
-	}
 }
 
 // genMapPNG draws a 2400x1600 procedural "world" (sea, lat/long grid, a few
@@ -361,18 +255,33 @@ func runWindowDemo() {
 	s.Start()
 	defer s.Stop()
 
-	quad := []window.Vertex{
-		{X: -0.5, Y: -0.5, R: 1.0, G: 0.0, B: 0.0, A: 1},
-		{X: 0.5, Y: -0.5, R: 0.0, G: 1.0, B: 0.0, A: 1},
-		{X: 0.5, Y: 0.5, R: 0.0, G: 0.0, B: 1.0, A: 1},
-		{X: -0.5, Y: 0.5, R: 1.0, G: 1.0, B: 0.0, A: 1},
-	}
+	var gfx *render.GPU
+	var quad *render.Mesh
+	var instances *render.InstanceBuffer
 
 	if err := win.Run(func(dc *gogpu.Context) {
-		dc.Clear(0.05, 0.05, 0.1, 1)
-		if err := win.DrawPolygon(dc, quad); err != nil {
-			logx.Errorf("draw: %v", err)
+		if gfx == nil {
+			gfx = render.New(win.DeviceProvider())
+			quad = render.NewUnitQuad(gfx.Device(), gfx.Queue())
+			instances = render.NewInstanceBuffer(gfx.Device(), 1)
+			instances.WriteAll([]render.InstanceData{{
+				Position: [2]float32{0, 0},
+				Scale:    [2]float32{600, 600},
+				Color:    [4]float32{1, 1, 1, 1},
+			}})
+			// Ortho: world [-300,300] → NDC [-1,1], Y flipped for screen.
+			s := float32(1.0 / 300)
+			vp := [16]float32{
+				s, 0, 0, 0,
+				0, -s, 0, 0,
+				0, 0, 1, 0,
+				0, 0, 0, 1,
+			}
+			gfx.SetCamera(vp, 1280, 720)
 		}
+		gfx.Begin(dc, render.Clear{R: 0.05, G: 0.05, B: 0.1, A: 1})
+		gfx.DrawInstanced(quad, instances)
+		gfx.End()
 	}); err != nil {
 		logx.Fatalf("window run failed: %v", err)
 	}
@@ -453,7 +362,7 @@ func runWorldDemo() {
 	lastFrame = time.Now()
 
 	logx.Info("world demo running: drag to pan, scroll to zoom, R=reset, =/- zoom")
-	var ren *render.Renderer
+	var gfx *render.GPU
 	if err := win.Run(func(dc *gogpu.Context) {
 		now := time.Now()
 		dt := float64(now.Sub(lastFrame).Seconds())
@@ -463,9 +372,9 @@ func runWorldDemo() {
 
 		vp := geometry.Sz(1280, 720)
 
-		if ren == nil {
-			ren = render.NewRenderer(win.DeviceProvider())
-			rend.SetRenderer(ren)
+		if gfx == nil {
+			gfx = render.New(win.DeviceProvider())
+			rend.SetRenderer(gfx.Renderer())
 		}
 
 		// Apply accumulated scroll-wheel zoom toward the cursor.

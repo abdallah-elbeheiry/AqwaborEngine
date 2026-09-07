@@ -1,13 +1,10 @@
-// Package render holds camera-driven canvas rendering. Its central piece is
-// MapView, a UI widget that displays a large image inside a viewport and lets
-// the user pan (left-drag) and zoom (mouse wheel, toward the cursor). The
-// drawing itself is factored into DrawCache.Draw so any other camera-driven
-// canvas (minimap, province overlay, ...) can reuse the visible-region scaling
-// without re-implementing it.
+// Package mapview provides a pannable/zoomable image widget for displaying
+// large maps inside a viewport. It owns a camera.Camera and uses CPU scaling
+// to draw the visible sub-region of the source image.
 //
-// render is deliberately decoupled from the generic ui library: it consumes an
-// ui.ImageAsset but never reaches into ui's internals beyond that public type.
-package render
+// This is a UI widget — it does not touch wgpu or the GPU render pipeline.
+// For GPU-accelerated map rendering (vector data, strokes), see maprender.
+package mapview
 
 import (
 	draw "golang.org/x/image/draw"
