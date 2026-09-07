@@ -4,10 +4,8 @@ import (
 	"math"
 	"unsafe"
 
-	"github.com/abdallah-elbeheiry/AqwaborEngine/camera"
 	"github.com/abdallah-elbeheiry/AqwaborEngine/mapdata"
 	"github.com/gogpu/gputypes"
-	"github.com/gogpu/ui/geometry"
 	"github.com/gogpu/wgpu"
 )
 
@@ -219,30 +217,4 @@ func clamp255(v float32) uint32 {
 		return 255
 	}
 	return uint32(v * 255)
-}
-
-// ComputeViewProj builds a column-major 4x4 view-projection matrix that
-// transforms raw int32 world coords (which need dividing by worldScale) to
-// clip space. The scale divisor is baked into the matrix so the shader does
-// a single matrix multiply.
-func ComputeViewProj(cam *camera.Camera, vp geometry.Size, worldScale float32) [16]float32 {
-	if worldScale == 0 {
-		worldScale = 1
-	}
-	pos := cam.Position()
-	zoom := cam.Zoom()
-	vpW := float32(vp.Width)
-	vpH := float32(vp.Height)
-
-	sx := zoom * 2 / vpW / worldScale
-	sy := zoom * 2 / vpH / worldScale
-	tx := -pos.X * zoom * 2 / vpW
-	ty := pos.Y * zoom * 2 / vpH
-
-	return [16]float32{
-		sx, 0, 0, 0,
-		0, sy, 0, 0,
-		0, 0, 1, 0,
-		tx, ty, 0, 1,
-	}
 }

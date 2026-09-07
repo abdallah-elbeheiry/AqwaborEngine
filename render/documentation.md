@@ -182,3 +182,13 @@ Full-frame helper: `SetCamera` → `Begin` → draw (with GPU cull if
 
 Use `ecs.Create[Color]` + `ecs.Attach[Color]` to share one colour instance
 across many sprite entities — no per-frame alloc.
+
+### ViewProjMap
+
+```go
+vpMat := render.ViewProjMap(camComp, viewW, viewH, worldScale)
+```
+
+Builds a column-major 4x4 orthographic matrix from a `camera.Camera`
+component with a world scale factor baked in (for `mapdata` int32 coordinates).
+Used by the world map demo; sprites use `camera.ViewProj` instead.

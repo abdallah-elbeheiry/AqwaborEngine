@@ -1,81 +1,75 @@
 # camera — 2D View Transform
 
-Minimal, widget-independent 2D view transform. Maps between world coordinates
-and local viewport coordinates.
+Minimal, widget-independent 2D view transform. `Camera` is the single source
+of truth for view state — position, zoom, and limits. It is an ECS component
+with exported PoD fields.
 
 ## Public API
 
-### Construction
+### Construction / Registration
 
 ```go
-cam := camera.NewCamera()
+camera.MustRegisterECS(w)  // register Camera component type
 ```
 
-### Coordinate conversion
+Spawn a camera entity:
 
 ```go
-local := cam.WorldToLocal(world, vp)   // world → viewport pixels
-world := cam.LocalToWorld(local, vp)   // viewport pixels → world
+camE := w.Create()
+ecs.MustAdd[camera.Camera](w, camE, camera.Camera{
+    X: 180, Y: 90,
+    MinZoom: 0.01,
+    MaxZoom: 1000,
+    Active:  1,
+})
+c, _ := ecs.Get[camera.Camera](w, camE)
+c.Fit(360, 180, 1280, 720)  // center + best-fit zoom
 ```
 
 ### Pan / zoom
 
 ```go
-cam.Pan(delta)                                    // delta in local viewport pixels
-cam.ZoomAt(factor, cursorLocal, vp)               // zoom keeping cursor point fixed
-cam.SetZoom(z)                                     // clamped to [minZoom, maxZoom]
-cam.SetZoomLimits(min, max)
+c.Pan(dx, dy)                                            // delta in local viewport pixels
+c.ZoomAt(factor, cursorX, cursorY, vpW, vpH)             // zoom keeping cursor point fixed
+camera.ClampZoom(c)                                      // clamp Zoom to [MinZoom, MaxZoom]
 ```
 
 ### Fit / clamp
 
 ```go
-cam.Fit(worldSize, vp)         // center + best-fit zoom
-cam.ClampToBounds(worldSize, vp)  // keep visible region inside world
+c.Fit(worldW, worldH, vpW, vpH)                // center + best-fit zoom
+c.ClampToBounds(worldW, worldH, vpW, vpH)      // keep visible region inside world
 ```
 
-## ECS Integration
-
-### Camera2D Component
+### Coordinate conversion
 
 ```go
-camera.MustRegisterECS(w)
+lx, ly := c.WorldToLocal(wx, wy, vpW, vpH)     // world → viewport pixels
+wx, wy := c.LocalToWorld(lx, ly, vpW, vpH)     // viewport pixels → world
 ```
 
-Registers the `Camera2D` component type. Spawn a camera entity:
+### View-projection
 
 ```go
-camEntity := w.Create()
-ecs.MustAdd[camera.Camera2D](w, camEntity, camera.Camera2D{
-    X: 640, Y: 360,
-    Zoom:    1,
-    MinZoom: 0.1,
-    MaxZoom: 10,
-    Active:  1,
-})
+vpMat := camera.ViewProj(*c, vpW, vpH)                   // sprites (no world scale)
+vpMat := render.ViewProjMap(*c, vpW, vpH, worldScale)     // map (with world scale)
 ```
 
-### ViewProjFrom
+Both return `[16]float32` column-major 4x4 for `render.GPU.SetCamera`.
+
+### Typical world demo frame
 
 ```go
-vpMat := camera.ViewProjFrom(camComp, viewW, viewH)
-```
+c, _ := ecs.Get[camera.Camera](w, camE)
+scene, _ := ecs.Get[maprender.MapScene](w, mapE)
 
-Builds a column-major 4x4 orthographic view-projection matrix from a `Camera2D`
-component. Returns `[16]float32` suitable for `render.GPU.SetCamera`.
+c.Pan(dx, dy)                    // input writes into Camera
+c.ZoomAt(factor, mx, my, vpW, vpH)
+camera.ClampZoom(c)
 
-### ClampZoom
-
-```go
-camera.ClampZoom(&camComp)
-```
-
-Clamps `Zoom` to `[MinZoom, MaxZoom]`. Call after manual zoom mutations.
-
-### Typical frame loop
-
-```go
-cam, _ := ecs.Get[camera.Camera2D](w, camEntity)
-vpMat := camera.ViewProjFrom(*cam, 1280, 720)
-render.DrawWorld(gfx, batch, dc, clear, vpMat, 1280, 720, bounds, 64)
+vpMat := render.ViewProjMap(*c, vpW, vpH, scene.WorldScale)
+gfx.SetCamera(vpMat, vpW, vpH)
+gfx.Begin(dc, render.Clear{R: scene.ClearR, ...})
+maprender.DrawECS(w, mapE)
+gfx.End()
 ```

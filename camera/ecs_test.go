@@ -22,62 +22,55 @@ func TestMustRegisterECS(t *testing.T) {
 	MustRegisterECS(w)
 }
 
-func TestViewProjFromIdentity(t *testing.T) {
-	c := Camera2D{X: 0, Y: 0, Zoom: 1}
-	vp := ViewProjFrom(c, 100, 100)
-	// sx = 1*2/100 = 0.02, sy = 1*2/100 = 0.02
+func TestViewProjIdentity(t *testing.T) {
+	c := Camera{X: 0, Y: 0, Zoom: 1}
+	vp := ViewProj(c, 100, 100)
 	if math.Abs(float64(vp[0]-0.02)) > 1e-6 {
 		t.Fatalf("vp[0] = %v, want 0.02", vp[0])
 	}
 	if math.Abs(float64(vp[5]-0.02)) > 1e-6 {
 		t.Fatalf("vp[5] = %v, want 0.02", vp[5])
 	}
-	// tx = 0, ty = 0
 	if vp[12] != 0 || vp[13] != 0 {
 		t.Fatalf("tx,ty = %v,%v, want 0,0", vp[12], vp[13])
 	}
 }
 
-func TestViewProjFromZoom(t *testing.T) {
-	c := Camera2D{X: 0, Y: 0, Zoom: 2}
-	vp := ViewProjFrom(c, 800, 600)
-	// sx = 2*2/800 = 0.005
+func TestViewProjZoom(t *testing.T) {
+	c := Camera{X: 0, Y: 0, Zoom: 2}
+	vp := ViewProj(c, 800, 600)
 	if math.Abs(float64(vp[0]-0.005)) > 1e-6 {
 		t.Fatalf("vp[0] = %v, want 0.005", vp[0])
 	}
-	// sy = 2*2/600 ≈ 0.006667
 	syWant := float32(2) * 2 / 600
 	if math.Abs(float64(vp[5]-syWant)) > 1e-6 {
 		t.Fatalf("vp[5] = %v, want %v", vp[5], syWant)
 	}
 }
 
-func TestViewProjFromTranslation(t *testing.T) {
-	c := Camera2D{X: 100, Y: 50, Zoom: 1}
-	vp := ViewProjFrom(c, 800, 600)
-	// tx = -100*2/800 = -0.25
+func TestViewProjTranslation(t *testing.T) {
+	c := Camera{X: 100, Y: 50, Zoom: 1}
+	vp := ViewProj(c, 800, 600)
 	txWant := float32(-100) * 2 / 800
 	if math.Abs(float64(vp[12]-txWant)) > 1e-6 {
 		t.Fatalf("vp[12] = %v, want %v", vp[12], txWant)
 	}
-	// ty = 50*2/600 ≈ 0.16667
 	tyWant := float32(50) * 2 / 600
 	if math.Abs(float64(vp[13]-tyWant)) > 1e-6 {
 		t.Fatalf("vp[13] = %v, want %v", vp[13], tyWant)
 	}
 }
 
-func TestViewProjFromZeroViewport(t *testing.T) {
-	c := Camera2D{Zoom: 1}
-	vp := ViewProjFrom(c, 0, 0)
-	// Should not divide by zero; uses fallback of 1.
+func TestViewProjZeroViewport(t *testing.T) {
+	c := Camera{Zoom: 1}
+	vp := ViewProj(c, 0, 0)
 	if vp[0] != 2 || vp[5] != 2 {
 		t.Fatalf("zero viewport should fallback to 1: got sx=%v sy=%v", vp[0], vp[5])
 	}
 }
 
 func TestClampZoom(t *testing.T) {
-	c := Camera2D{Zoom: 0.01, MinZoom: 0.1, MaxZoom: 10}
+	c := Camera{Zoom: 0.01, MinZoom: 0.1, MaxZoom: 10}
 	ClampZoom(&c)
 	if c.Zoom != 0.1 {
 		t.Fatalf("Zoom = %v, want 0.1 (min clamp)", c.Zoom)
@@ -97,9 +90,67 @@ func TestClampZoom(t *testing.T) {
 }
 
 func TestClampZoomZeroLimits(t *testing.T) {
-	c := Camera2D{Zoom: 5, MinZoom: 0, MaxZoom: 0}
+	c := Camera{Zoom: 5, MinZoom: 0, MaxZoom: 0}
 	ClampZoom(&c)
 	if c.Zoom != 5 {
 		t.Fatalf("zero limits should not clamp: Zoom = %v", c.Zoom)
+	}
+}
+
+func TestWorldLocalRoundtrip(t *testing.T) {
+	c := Camera{X: 500, Y: 300, Zoom: 1}
+	for _, z := range []float32{0.5, 1, 2, 4, 8} {
+		c.Zoom = z
+		for _, p := range [][2]float32{{0, 0}, {100, 100}, {500, 300}, {1000, 800}} {
+			lx, ly := c.WorldToLocal(p[0], p[1], 800, 600)
+			wx, wy := c.LocalToWorld(lx, ly, 800, 600)
+			if dx, dy := wx-p[0], wy-p[1]; dx*dx+dy*dy > 1e-6 {
+				t.Fatalf("roundtrip failed z=%.2f p=(%.0f,%.0f) got=(%.4f,%.4f)", z, p[0], p[1], wx, wy)
+			}
+		}
+	}
+}
+
+func TestPan(t *testing.T) {
+	c := Camera{X: 500, Y: 300, Zoom: 2}
+	c.Pan(10, 0) // drag right 10 px
+	if c.X >= 500 {
+		t.Fatalf("panning right should decrease X: got %v", c.X)
+	}
+	c.Pan(0, -20) // drag up 20 px
+	if c.Y <= 300 {
+		t.Fatalf("panning up should increase Y: got %v", c.Y)
+	}
+}
+
+func TestZoomAtCursor(t *testing.T) {
+	c := Camera{X: 500, Y: 300, Zoom: 1}
+	cursorX, cursorY := float32(200), float32(150)
+	bx, by := c.LocalToWorld(cursorX, cursorY, 800, 600)
+	c.ZoomAt(2, cursorX, cursorY, 800, 600)
+	ax, ay := c.LocalToWorld(cursorX, cursorY, 800, 600)
+	if dx, dy := bx-ax, by-ay; dx*dx+dy*dy > 1e-6 {
+		t.Fatalf("world point under cursor moved: before=(%.4f,%.4f) after=(%.4f,%.4f)", bx, by, ax, ay)
+	}
+}
+
+func TestClampToBounds(t *testing.T) {
+	c := Camera{X: -1e9, Y: -1e9, Zoom: 2}
+	c.ClampToBounds(1000, 1000, 800, 600) // visible 400x300
+	if c.X < 200-1e-3 || c.Y < 150-1e-3 {
+		t.Fatalf("clamp did not keep map in view (low): (%v, %v)", c.X, c.Y)
+	}
+
+	c.X, c.Y = 1e9, 1e9
+	c.ClampToBounds(1000, 1000, 800, 600)
+	if c.X > 800+1e-3 || c.Y > 850+1e-3 {
+		t.Fatalf("clamp did not keep map in view (high): (%v, %v)", c.X, c.Y)
+	}
+
+	c.Zoom = 0.1
+	c.X, c.Y = 1e9, 1e9
+	c.ClampToBounds(1000, 1000, 800, 600)
+	if c.X != 500 || c.Y != 500 {
+		t.Fatalf("expected centering when viewport > world, got (%v, %v)", c.X, c.Y)
 	}
 }

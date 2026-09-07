@@ -37,12 +37,12 @@ func (c *DrawCache) Draw(canvas widget.Canvas, src image.Image, cam *camera.Came
 	}
 
 	// Visible world rectangle, clamped to the image itself.
-	tl := cam.LocalToWorld(geometry.Pt(0, 0), vp)
-	br := cam.LocalToWorld(geometry.Pt(vp.Width, vp.Height), vp)
-	x0 := clampF(tl.X, 0, float32(sw))
-	y0 := clampF(tl.Y, 0, float32(sh))
-	x1 := clampF(br.X, 0, float32(sw))
-	y1 := clampF(br.Y, 0, float32(sh))
+	tlx, tly := cam.LocalToWorld(0, 0, vp.Width, vp.Height)
+	brx, bry := cam.LocalToWorld(vp.Width, vp.Height, vp.Width, vp.Height)
+	x0 := clampF(tlx, 0, float32(sw))
+	y0 := clampF(tly, 0, float32(sh))
+	x1 := clampF(brx, 0, float32(sw))
+	y1 := clampF(bry, 0, float32(sh))
 	if x1 <= x0 || y1 <= y0 {
 		return
 	}
@@ -53,10 +53,10 @@ func (c *DrawCache) Draw(canvas widget.Canvas, src image.Image, cam *camera.Came
 		return
 	}
 
-	dstX := (x0 - tl.X) * cam.Zoom()
-	dstY := (y0 - tl.Y) * cam.Zoom()
-	dstW := int(float32(subW)*cam.Zoom() + 0.5)
-	dstH := int(float32(subH)*cam.Zoom() + 0.5)
+	dstX := (x0 - tlx) * cam.Zoom
+	dstY := (y0 - tly) * cam.Zoom
+	dstW := int(float32(subW)*cam.Zoom + 0.5)
+	dstH := int(float32(subH)*cam.Zoom + 0.5)
 
 	scaled := c.scaleRegion(src, sub, dstW, dstH)
 	if scaled == nil {

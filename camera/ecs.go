@@ -1,13 +1,10 @@
 package camera
 
-import (
-	"github.com/abdallah-elbeheiry/AqwaborEngine/ecs"
-)
+import "github.com/abdallah-elbeheiry/AqwaborEngine/ecs"
 
-// Camera2D is an ECS-friendly 2D camera component. It stores the same
-// information as Camera but as a plain-old-data struct suitable for
-// component registration and handle-based sharing.
-type Camera2D struct {
+// Camera is an ECS 2D camera component and the single source of truth for
+// all view state (position, zoom, limits).
+type Camera struct {
 	X, Y    float32
 	Zoom    float32
 	MinZoom float32
@@ -15,9 +12,9 @@ type Camera2D struct {
 	Active  uint8 // 1 = primary camera
 }
 
-// RegisterECS registers the Camera2D component type with the given world.
+// RegisterECS registers the Camera component type with the given world.
 func RegisterECS(w *ecs.World) error {
-	return ecs.Register[Camera2D](w)
+	return ecs.Register[Camera](w)
 }
 
 // MustRegisterECS is like RegisterECS but panics on error.
@@ -27,28 +24,23 @@ func MustRegisterECS(w *ecs.World) {
 	}
 }
 
-// ViewProjFrom builds a column-major 4x4 orthographic view-projection matrix
-// from a Camera2D component and viewport size. The matrix maps raw world
-// coordinates to clip space, with the camera centred in the viewport.
-func ViewProjFrom(c Camera2D, viewW, viewH float32) [16]float32 {
+// ViewProj builds a column-major 4x4 orthographic view-projection matrix from
+// a Camera component and viewport size.
+func ViewProj(c Camera, vpW, vpH float32) [16]float32 {
 	zoom := c.Zoom
 	if zoom == 0 {
 		zoom = 1
 	}
-	vpW := viewW
-	vpH := viewH
 	if vpW == 0 {
 		vpW = 1
 	}
 	if vpH == 0 {
 		vpH = 1
 	}
-
 	sx := zoom * 2 / vpW
 	sy := zoom * 2 / vpH
 	tx := -c.X * zoom * 2 / vpW
 	ty := c.Y * zoom * 2 / vpH
-
 	return [16]float32{
 		sx, 0, 0, 0,
 		0, sy, 0, 0,
@@ -57,12 +49,97 @@ func ViewProjFrom(c Camera2D, viewW, viewH float32) [16]float32 {
 	}
 }
 
-// ClampZoom clamps the Zoom field of c to [MinZoom, MaxZoom].
-func ClampZoom(c *Camera2D) {
+// ClampZoom clamps c.Zoom to [MinZoom, MaxZoom].
+func ClampZoom(c *Camera) {
 	if c.MinZoom > 0 && c.Zoom < c.MinZoom {
 		c.Zoom = c.MinZoom
 	}
 	if c.MaxZoom > 0 && c.Zoom > c.MaxZoom {
 		c.Zoom = c.MaxZoom
 	}
+}
+
+// Pan moves the view by (dx, dy) in local viewport pixels.
+// Dragging right (positive dx) shifts the world left.
+// Dragging down (positive dy) shifts the world down (camera Y decreases).
+func (c *Camera) Pan(dx, dy float32) {
+	if c.Zoom == 0 {
+		return
+	}
+	inv := 1 / c.Zoom
+	c.X -= dx * inv
+	c.Y -= dy * inv
+}
+
+// ZoomAt multiplies Zoom by factor while keeping the world point under the
+// cursor fixed on screen. cursorX/cursorY are in viewport pixels.
+func (c *Camera) ZoomAt(factor, cursorX, cursorY, vpW, vpH float32) {
+	bx := (cursorX-vpW/2)/c.Zoom + c.X
+	by := (cursorY-vpH/2)/c.Zoom + c.Y
+
+	c.Zoom *= factor
+	ClampZoom(c)
+
+	ax := (cursorX-vpW/2)/c.Zoom + c.X
+	ay := (cursorY-vpH/2)/c.Zoom + c.Y
+
+	c.X += bx - ax
+	c.Y += by - ay
+}
+
+// Fit centres the camera on the world and picks a zoom that shows the whole
+// world inside the viewport, clamped to [MinZoom, MaxZoom].
+func (c *Camera) Fit(worldW, worldH, vpW, vpH float32) {
+	if worldW > 0 && worldH > 0 && vpW > 0 && vpH > 0 {
+		c.Zoom = min(vpW/worldW, vpH/worldH)
+	} else {
+		c.Zoom = 1
+	}
+	ClampZoom(c)
+	c.X = worldW / 2
+	c.Y = worldH / 2
+}
+
+// ClampToBounds keeps the visible region from drifting off the world.
+func (c *Camera) ClampToBounds(worldW, worldH, vpW, vpH float32) {
+	if c.Zoom == 0 {
+		return
+	}
+	visibleW := vpW / c.Zoom
+	visibleH := vpH / c.Zoom
+
+	if visibleW >= worldW {
+		c.X = worldW / 2
+	} else {
+		c.X = clampF(c.X, visibleW/2, worldW-visibleW/2)
+	}
+	if visibleH >= worldH {
+		c.Y = worldH / 2
+	} else {
+		c.Y = clampF(c.Y, visibleH/2, worldH-visibleH/2)
+	}
+}
+
+// WorldToLocal converts a world point to local viewport pixels.
+func (c *Camera) WorldToLocal(wx, wy, vpW, vpH float32) (float32, float32) {
+	lx := (wx-c.X)*c.Zoom + vpW/2
+	ly := (wy-c.Y)*c.Zoom + vpH/2
+	return lx, ly
+}
+
+// LocalToWorld converts a local viewport pixel to world coordinates.
+func (c *Camera) LocalToWorld(lx, ly, vpW, vpH float32) (float32, float32) {
+	wx := (lx-vpW/2)/c.Zoom + c.X
+	wy := (ly-vpH/2)/c.Zoom + c.Y
+	return wx, wy
+}
+
+func clampF(v, lo, hi float32) float32 {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
 }
