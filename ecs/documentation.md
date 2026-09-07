@@ -65,12 +65,12 @@ alive := w.Alive(e)        // true if handle is valid (in range + generation mat
 
 ## Component registration
 
-Register component types once before use. Idempotent.
+Register component types once before use. Idempotent. Components must be plain data (no slices, maps, pointers, interfaces, channels, or funcs); use handles for references.
 
 ```go
-ecs.Register[Position](w)
-ecs.Register[Velocity](w)
-ecs.Register[Health](w)
+ecs.MustRegister[Position](w)
+ecs.MustRegister[Velocity](w)
+ecs.MustRegister[Health](w)
 ```
 
 Components are ordinary Go structs. No interfaces, no embedding, no tags.

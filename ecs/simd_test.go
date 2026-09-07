@@ -7,8 +7,8 @@ import (
 
 func TestSIMDGroupLen(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
-	Register[Velocity](w)
+	MustRegister[Position](w)
+	MustRegister[Velocity](w)
 
 	for i := range 5 {
 		e := w.Create()
@@ -26,7 +26,7 @@ func TestSIMDGroupLen(t *testing.T) {
 
 func TestSIMDFloat64s(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
+	MustRegister[Position](w)
 
 	for i := range 4 {
 		e := w.Create()
@@ -48,7 +48,7 @@ func TestSIMDFloat64s(t *testing.T) {
 
 func TestSIMDFloat32s(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
+	MustRegister[Position](w)
 
 	for i := range 3 {
 		e := w.Create()
@@ -73,8 +73,8 @@ func TestSIMDFloat32s(t *testing.T) {
 
 func TestSIMDAddVec(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
-	Register[Velocity](w)
+	MustRegister[Position](w)
+	MustRegister[Velocity](w)
 
 	for i := range 4 {
 		e := w.Create()
@@ -100,7 +100,7 @@ func TestSIMDAddVec(t *testing.T) {
 
 func TestSIMDAddNumber(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
+	MustRegister[Position](w)
 
 	for i := range 3 {
 		e := w.Create()
@@ -122,7 +122,7 @@ func TestSIMDAddNumber(t *testing.T) {
 
 func TestSIMDMulNumber(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
+	MustRegister[Position](w)
 
 	for i := range 3 {
 		e := w.Create()
@@ -144,8 +144,8 @@ func TestSIMDMulNumber(t *testing.T) {
 
 func TestSIMDSubVec(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
-	Register[Velocity](w)
+	MustRegister[Position](w)
+	MustRegister[Velocity](w)
 
 	for i := range 3 {
 		e := w.Create()
@@ -171,8 +171,8 @@ func TestSIMDSubVec(t *testing.T) {
 
 func TestSIMDMulVec(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
-	Register[Velocity](w)
+	MustRegister[Position](w)
+	MustRegister[Velocity](w)
 
 	for i := range 3 {
 		e := w.Create()
@@ -198,8 +198,8 @@ func TestSIMDMulVec(t *testing.T) {
 
 func TestSIMDDivVec(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
-	Register[Velocity](w)
+	MustRegister[Position](w)
+	MustRegister[Velocity](w)
 
 	for i := range 3 {
 		e := w.Create()
@@ -225,7 +225,7 @@ func TestSIMDDivVec(t *testing.T) {
 
 func TestSIMDEmptyGroup(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
+	MustRegister[Position](w)
 
 	g := NewGroup(w, Position{})
 	xs := g.Float64s(func(c any) *float64 { return &c.(*Position).X })
@@ -241,7 +241,7 @@ func TestSIMDEmptyGroup(t *testing.T) {
 
 func TestSIMDEntityGroupFloat64s(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
+	MustRegister[Position](w)
 
 	e1 := w.Create()
 	e2 := w.Create()
@@ -263,7 +263,7 @@ func TestSIMDEntityGroupFloat64s(t *testing.T) {
 
 func TestSIMDEntityGroupAddNumber(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
+	MustRegister[Position](w)
 
 	e1 := w.Create()
 	e2 := w.Create()
@@ -292,7 +292,7 @@ func TestSIMDEntityGroupAddNumber(t *testing.T) {
 
 func TestSIMDEntityGroupFilter(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
+	MustRegister[Position](w)
 
 	for i := range 10 {
 		e := w.Create()

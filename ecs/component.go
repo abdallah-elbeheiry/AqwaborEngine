@@ -1,10 +1,15 @@
 package ecs
 
 import (
+	"errors"
 	"reflect"
 	"unsafe"
 
 	"github.com/abdallah-elbeheiry/AqwaborEngine/logx"
+)
+
+var (
+	ErrComponentHasPointers = errors.New("component type contains pointers (slices, maps, interfaces, channels, funcs, or pointers); components must be plain data + handles only")
 )
 
 // ComponentID is a dense, stable identifier for a registered component type.
@@ -51,17 +56,48 @@ func newComponentRegistry(l *logx.Logger) *componentRegistry {
 	}
 }
 
+// hasPointers recursively checks if a type contains any pointer-like fields.
+func hasPointers(t reflect.Type, seen map[reflect.Type]bool) bool {
+	if t == nil {
+		return false
+	}
+	if seen[t] {
+		return false
+	}
+	seen[t] = true
+
+	switch t.Kind() {
+	case reflect.Ptr, reflect.Slice, reflect.Map, reflect.Chan, reflect.Func, reflect.Interface:
+		return true
+	case reflect.Struct:
+		for i := 0; i < t.NumField(); i++ {
+			if hasPointers(t.Field(i).Type, seen) {
+				return true
+			}
+		}
+		return false
+	case reflect.Array:
+		return hasPointers(t.Elem(), seen)
+	default:
+		return false
+	}
+}
+
 // register registers an owned component type. Idempotent.
-func register[T any](r *componentRegistry, l *logx.Logger) ComponentID {
+func register[T any](r *componentRegistry, l *logx.Logger) (ComponentID, error) {
 	var zero T
 	typ := reflect.TypeOf(zero)
 	if typ.Kind() == reflect.Ptr {
 		typ = typ.Elem()
 	}
 
+	if hasPointers(typ, make(map[reflect.Type]bool)) {
+		return 0, ErrComponentHasPointers
+	}
+
 	if info, ok := r.byType[typ]; ok {
 		l.Debug("component already registered", "type", typ, "id", info.id)
-		return info.id
+		return info.id, nil
 	}
 
 	info := &componentInfo{
@@ -76,7 +112,7 @@ func register[T any](r *componentRegistry, l *logx.Logger) ComponentID {
 	r.nextID++
 
 	l.Info("component registered", "type", typ, "id", info.id, "size", info.size)
-	return info.id
+	return info.id, nil
 }
 
 func (r *componentRegistry) lookup(typ reflect.Type) (*componentInfo, bool) {
@@ -95,8 +131,18 @@ func (r *componentRegistry) componentInfoFor(id ComponentID) *componentInfo {
 }
 
 // Register registers a component type with the world.
-func Register[T any](w *World) {
-	register[T](w.registry, w.log)
+// Returns an error if the component type contains pointers.
+func Register[T any](w *World) error {
+	_, err := register[T](w.registry, w.log)
+	return err
+}
+
+// MustRegister registers a component type with the world.
+// Panics if the component type contains pointers or is already registered.
+func MustRegister[T any](w *World) {
+	if err := Register[T](w); err != nil {
+		panic(err)
+	}
 }
 
 // --- Component Pool ---

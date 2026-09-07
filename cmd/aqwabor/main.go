@@ -32,7 +32,7 @@ func main() {
 
 	// Open the audio context once and keep it alive for the whole program so the
 	// song keeps playing while the demo runs.
-	snd, err := sound.New(sound.WithVolume(0.5))
+	snd, err := sound.New(sound.WithVolume(0))
 	if err != nil {
 		logx.Errorf("sound init (no audio device?): %v", err)
 	} else {
@@ -406,7 +406,7 @@ func runWorldDemo() {
 	cam.SetPosition(geometry.Pt(0, 0))
 	cam.SetZoomLimits(0.01, 1000)
 
-	rend := maprender.NewRenderer(world, cam, win)
+	rend := maprender.NewRenderer(world, cam, nil)
 
 	app := win.App()
 	mgr := input.NewManager(gogpuinput.NewBackend(app))
@@ -453,6 +453,7 @@ func runWorldDemo() {
 	lastFrame = time.Now()
 
 	logx.Info("world demo running: drag to pan, scroll to zoom, R=reset, =/- zoom")
+	var ren *render.Renderer
 	if err := win.Run(func(dc *gogpu.Context) {
 		now := time.Now()
 		dt := float64(now.Sub(lastFrame).Seconds())
@@ -461,6 +462,11 @@ func runWorldDemo() {
 		mgr.Update(dt)
 
 		vp := geometry.Sz(1280, 720)
+
+		if ren == nil {
+			ren = render.NewRenderer(win.DeviceProvider())
+			rend.SetRenderer(ren)
+		}
 
 		// Apply accumulated scroll-wheel zoom toward the cursor.
 		scrollMu.Lock()
@@ -478,11 +484,6 @@ func runWorldDemo() {
 		}
 
 		rend.SetViewport(vp)
-
-		// The data carries its own background, so the land colour sits on the
-		// same ground it was designed against.
-		bg := world.Background
-		dc.Clear(bg.R, bg.G, bg.B, bg.A)
 
 		_ = rend.Draw(dc)
 	}); err != nil {
