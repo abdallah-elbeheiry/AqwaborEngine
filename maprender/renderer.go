@@ -5,7 +5,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/abdallah-elbeheiry/AqwaborEngine/camera"
 	"github.com/abdallah-elbeheiry/AqwaborEngine/logx"
 	"github.com/abdallah-elbeheiry/AqwaborEngine/mapdata"
 	"github.com/abdallah-elbeheiry/AqwaborEngine/render"
@@ -21,7 +20,7 @@ const (
 
 type Renderer struct {
 	world    *mapdata.World
-	cam      *camera.Camera
+	refZoom  float32
 	viewport geometry.Size
 	ren      *render.Renderer
 
@@ -47,10 +46,10 @@ type Stats struct {
 
 func (r *Renderer) Stats() Stats { return r.stats }
 
-func NewRenderer(world *mapdata.World, cam *camera.Camera, ren *render.Renderer) *Renderer {
+func NewRenderer(world *mapdata.World, refZoom float32, ren *render.Renderer) *Renderer {
 	r := &Renderer{
 		world:         world,
-		cam:           cam,
+		refZoom:       refZoom,
 		ren:           ren,
 		strokeWidthPx: defaultStrokeWidthPx,
 		minSegmentPx:  defaultMinSegmentPx,
@@ -83,7 +82,7 @@ func (r *Renderer) buildGPUMesh() {
 		render.MapMeshConfig{
 			StrokeWidthPx: r.strokeWidthPx,
 			MinSegmentPx:  r.minSegmentPx,
-			RefZoom:       r.cam.Zoom(),
+			RefZoom:       r.refZoom,
 		},
 		true, // fillsOnly: strokes go through BuildMapStrokes + DrawStrokes
 	)
@@ -153,19 +152,18 @@ func (r *Renderer) buildFills() {
 }
 
 func (r *Renderer) SetViewport(vp geometry.Size) { r.viewport = vp }
-func (r *Renderer) SetCamera(cam *camera.Camera) { r.cam = cam }
+func (r *Renderer) SetRefZoom(z float32)         { r.refZoom = z }
 func (r *Renderer) SetStrokeWidth(px float32)    { r.strokeWidthPx = px }
 
 func (r *Renderer) Draw() {
-	if r.world == nil || r.cam == nil || r.ren == nil || r.mapMesh == nil || r.mapPipe == nil {
+	if r.world == nil || r.ren == nil || r.mapMesh == nil || r.mapPipe == nil {
 		return
 	}
 	if r.viewport.Width <= 0 || r.viewport.Height <= 0 {
 		return
 	}
 
-	zoom := r.cam.Zoom()
-	r.stats = Stats{MetresPerPx: metresPerDegree / float64(zoom)}
+	r.stats = Stats{MetresPerPx: metresPerDegree / float64(r.refZoom)}
 
 	// Fills (baked triangle mesh — still needed for filled regions).
 	r.ren.DrawMapMesh(r.mapMesh, r.mapPipe)

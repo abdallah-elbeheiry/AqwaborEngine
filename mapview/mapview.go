@@ -23,7 +23,7 @@ type MapView struct {
 	widget.WidgetBase
 
 	asset *ui.ImageAsset
-	cam   *camera.Camera
+	cam   camera.Camera
 
 	drag  *gesture.DragRecognizer
 	cache DrawCache
@@ -38,7 +38,7 @@ type MapView struct {
 func New(asset *ui.ImageAsset) *MapView {
 	m := &MapView{
 		asset: asset,
-		cam:   camera.NewCamera(),
+		cam:   camera.Camera{MinZoom: 0.5, MaxZoom: 8},
 	}
 	m.SetVisible(true)
 	m.SetEnabled(true)
@@ -47,13 +47,14 @@ func New(asset *ui.ImageAsset) *MapView {
 
 // ZoomRange overrides the allowed zoom limits for this map.
 func (m *MapView) ZoomRange(min, max float32) *MapView {
-	m.cam.SetZoomLimits(min, max)
+	m.cam.MinZoom = min
+	m.cam.MaxZoom = max
 	return m
 }
 
 // Camera returns the camera driving this view. It is exposed so callers can
 // read or drive the view programmatically (e.g. center on a location).
-func (m *MapView) Camera() *camera.Camera { return m.cam }
+func (m *MapView) Camera() *camera.Camera { return &m.cam }
 
 // OnPointer registers a callback invoked with the pointer position over the
 // map, expressed both in widget-local pixels and in world (map) coordinates.
@@ -69,22 +70,26 @@ func (m *MapView) OnPointer(fn func(local, world geometry.Point)) *MapView {
 func (m *MapView) Overview() *MapView {
 	if m.asset != nil && !m.asset.IsReleased() {
 		w, h := m.asset.Size()
-		m.cam.Fit(geometry.Sz(float32(w), float32(h)), m.Bounds().Size())
+		vp := m.Bounds().Size()
+		m.cam.Fit(float32(w), float32(h), vp.Width, vp.Height)
 	}
 	m.SetNeedsRedraw(true)
 	return m
 }
 
 // LocalToWorld converts a point in this widget's local pixels to world
-// coordinates (image-pixel space). This is the hook later map content — country
-// hit-testing, unit overlays — will use.
+// coordinates (image-pixel space).
 func (m *MapView) LocalToWorld(p geometry.Point) geometry.Point {
-	return m.cam.LocalToWorld(p, m.Bounds().Size())
+	vp := m.Bounds().Size()
+	wx, wy := m.cam.LocalToWorld(p.X, p.Y, vp.Width, vp.Height)
+	return geometry.Pt(wx, wy)
 }
 
 // WorldToLocal converts a world point to this widget's local pixels.
 func (m *MapView) WorldToLocal(p geometry.Point) geometry.Point {
-	return m.cam.WorldToLocal(p, m.Bounds().Size())
+	vp := m.Bounds().Size()
+	lx, ly := m.cam.WorldToLocal(p.X, p.Y, vp.Width, vp.Height)
+	return geometry.Pt(lx, ly)
 }
 
 // Layout fills the allotted space (a viewport wants to be as large as it is
@@ -111,7 +116,7 @@ func (m *MapView) Layout(_ widget.Context, c geometry.Constraints) geometry.Size
 	if !m.initialized && result.Width > 0 && result.Height > 0 {
 		if m.asset != nil && !m.asset.IsReleased() {
 			w, h := m.asset.Size()
-			m.cam.Fit(geometry.Sz(float32(w), float32(h)), result)
+			m.cam.Fit(float32(w), float32(h), result.Width, result.Height)
 		}
 		m.initialized = true
 	}
@@ -136,7 +141,7 @@ func (m *MapView) Draw(_ widget.Context, canvas widget.Canvas) {
 
 	img, ok := m.asset.Take()
 	if ok && img != nil {
-		m.cache.Draw(canvas, img, m.cam, vp)
+		m.cache.Draw(canvas, img, &m.cam, vp)
 	}
 
 	canvas.PopTransform()
@@ -157,7 +162,7 @@ func (m *MapView) Event(_ widget.Context, e event.Event) bool {
 		default:
 			return false
 		}
-		m.cam.ZoomAt(factor, ev.Position, m.Bounds().Size())
+		m.cam.ZoomAt(factor, ev.Position.X, ev.Position.Y, m.Bounds().Size().Width, m.Bounds().Size().Height)
 		m.clampCamera()
 		m.SetNeedsRedraw(true)
 		if m.onPointer != nil {
@@ -182,7 +187,7 @@ func (m *MapView) GestureHitTest(_ geometry.Point) []gesture.Recognizer {
 		m.drag = gesture.NewDragRecognizer(gesture.DragConfig{
 			Direction: gesture.DragDirectionPan,
 			OnDragUpdate: func(d gesture.DragUpdateDetails) {
-				m.cam.Pan(d.Delta)
+				m.cam.Pan(d.Delta.X, d.Delta.Y)
 				m.clampCamera()
 				m.SetNeedsRedraw(true)
 				if m.onPointer != nil {
@@ -199,7 +204,8 @@ func (m *MapView) clampCamera() {
 		return
 	}
 	w, h := m.asset.Size()
-	m.cam.ClampToBounds(geometry.Sz(float32(w), float32(h)), m.Bounds().Size())
+	vp := m.Bounds().Size()
+	m.cam.ClampToBounds(float32(w), float32(h), vp.Width, vp.Height)
 }
 
 // Children: leaf widget.

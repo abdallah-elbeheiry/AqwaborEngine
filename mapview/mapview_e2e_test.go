@@ -28,7 +28,6 @@ func ptr(et gesture.PointerEventType, p geometry.Point, buttons event.ButtonStat
 
 func drag(a *gapp.App, from, to geometry.Point) {
 	a.Window().HandlePointerEvent(ptr(gesture.PointerDown, from, event.ButtonStateLeft))
-	// a few intermediate steps to clear slop and exercise multiple updates
 	mid := geometry.Pt((from.X+to.X)/2, (from.Y+to.Y)/2)
 	a.Window().HandlePointerEvent(ptr(gesture.PointerMove, mid, event.ButtonStateLeft))
 	a.Window().HandlePointerEvent(ptr(gesture.PointerMove, to, event.ButtonStateLeft))
@@ -69,7 +68,7 @@ func TestMapViewE2E(t *testing.T) {
 	}
 
 	cam := mv.Camera()
-	initZoom := cam.Zoom()
+	initZoom := cam.Zoom
 	if initZoom <= 0 {
 		t.Fatalf("initial zoom not set: %v", initZoom)
 	}
@@ -78,59 +77,56 @@ func TestMapViewE2E(t *testing.T) {
 	}
 
 	// --- zoom at cursor keeps the world point fixed ---
-	worldBefore := cam.LocalToWorld(cursor, vp)
+	bx, by := cam.LocalToWorld(cursor.X, cursor.Y, vp.Width, vp.Height)
 	wheel(a, geometry.Pt(0, -100), cursor) // scroll up == zoom in
-	if cam.Zoom() <= initZoom {
-		t.Fatalf("wheel up did not zoom in: %v -> %v", initZoom, cam.Zoom())
+	if cam.Zoom <= initZoom {
+		t.Fatalf("wheel up did not zoom in: %v -> %v", initZoom, cam.Zoom)
 	}
-	worldAfter := cam.LocalToWorld(cursor, vp)
-	if d := worldBefore.Sub(worldAfter).Length(); d > 1e-2 {
-		t.Fatalf("zoom-at-cursor moved world point: before=%v after=%v dist=%.4f", worldBefore, worldAfter, d)
+	ax, ay := cam.LocalToWorld(cursor.X, cursor.Y, vp.Width, vp.Height)
+	if dx, dy := bx-ax, by-ay; dx*dx+dy*dy > 1e-4 {
+		t.Fatalf("zoom-at-cursor moved world point: before=(%.4f,%.4f) after=(%.4f,%.4f)", bx, by, ax, ay)
 	}
 
 	// --- zoom out ---
-	zoomAfterIn := cam.Zoom()
+	zoomAfterIn := cam.Zoom
 	wheel(a, geometry.Pt(0, 100), cursor) // scroll down == zoom out
-	if cam.Zoom() >= zoomAfterIn {
-		t.Fatalf("wheel down did not zoom out: %v -> %v", zoomAfterIn, cam.Zoom())
+	if cam.Zoom >= zoomAfterIn {
+		t.Fatalf("wheel down did not zoom out: %v -> %v", zoomAfterIn, cam.Zoom)
 	}
 
 	// --- zoom bounds clamping ---
 	for range 60 {
 		wheel(a, geometry.Pt(0, -100), cursor)
 	}
-	if cam.Zoom() > 8+1e-3 {
-		t.Fatalf("zoom exceeded max: %v", cam.Zoom())
+	if cam.Zoom > 8+1e-3 {
+		t.Fatalf("zoom exceeded max: %v", cam.Zoom)
 	}
 	for range 120 {
 		wheel(a, geometry.Pt(0, 100), cursor)
 	}
-	if cam.Zoom() < 0.5-1e-3 {
-		t.Fatalf("zoom below min: %v", cam.Zoom())
+	if cam.Zoom < 0.5-1e-3 {
+		t.Fatalf("zoom below min: %v", cam.Zoom)
 	}
 
 	// --- pan (drag right moves the map right, center world shifts left) ---
-	mv.Camera().SetZoom(2)
+	cam.Zoom = 2
 	a.Frame()
-	beforePan := mv.Camera().Position()
+	beforePanX := cam.X
 	drag(a, cursor, geometry.Pt(cursor.X+120, cursor.Y))
-	afterPan := mv.Camera().Position()
-	if afterPan.X >= beforePan.X {
-		t.Fatalf("dragging right should decrease world center X: %v -> %v", beforePan, afterPan)
+	if cam.X >= beforePanX {
+		t.Fatalf("dragging right should decrease world center X: %v -> %v", beforePanX, cam.X)
 	}
 
 	// --- bounds clamp: a huge drag must not lose the map ---
-	mv.Camera().SetZoom(2)
+	cam.Zoom = 2
 	a.Frame()
 	drag(a, cursor, geometry.Pt(sz.Width*3, sz.Height*3))
-	clamped := mv.Camera().Position()
-	aw, ah := asset.Size()
-	wW, wH := float32(aw), float32(ah)
-	_ = wH
+	aw, _ := asset.Size()
+	wW := float32(aw)
 	visW := vp.Width / 2
 	if visW < wW {
-		if clamped.X < visW/2-1 || clamped.X > wW-visW/2+1 {
-			t.Fatalf("camera X escaped bounds after drag: %v (worldW=%v visW=%v)", clamped.X, wW, visW)
+		if cam.X < visW/2-1 || cam.X > wW-visW/2+1 {
+			t.Fatalf("camera X escaped bounds after drag: %v (worldW=%v visW=%v)", cam.X, wW, visW)
 		}
 	}
 

@@ -1,6 +1,7 @@
 package render
 
 import (
+	"github.com/abdallah-elbeheiry/AqwaborEngine/camera"
 	"github.com/abdallah-elbeheiry/AqwaborEngine/ecs"
 	"github.com/gogpu/gogpu"
 )
@@ -130,4 +131,38 @@ func SpawnSprite(w *ecs.World, t Transform, c Color, s Sprite) ecs.Entity {
 	ecs.MustAdd[Color](w, e, c)
 	ecs.MustAdd[Sprite](w, e, s)
 	return e
+}
+
+// ViewProjMap builds a column-major 4x4 orthographic view-projection matrix
+// from a Camera component, viewport size, and world scale. The world scale
+// factor (from mapdata) is baked into the matrix so the map shader does a
+// single matrix multiply on int32 world coordinates.
+func ViewProjMap(c camera.Camera, viewW, viewH, worldScale float32) [16]float32 {
+	if worldScale == 0 {
+		worldScale = 1
+	}
+	zoom := c.Zoom
+	if zoom == 0 {
+		zoom = 1
+	}
+	vpW := viewW
+	vpH := viewH
+	if vpW == 0 {
+		vpW = 1
+	}
+	if vpH == 0 {
+		vpH = 1
+	}
+
+	sx := zoom * 2 / vpW / worldScale
+	sy := zoom * 2 / vpH / worldScale
+	tx := -c.X * zoom * 2 / vpW
+	ty := c.Y * zoom * 2 / vpH
+
+	return [16]float32{
+		sx, 0, 0, 0,
+		0, sy, 0, 0,
+		0, 0, 1, 0,
+		tx, ty, 0, 1,
+	}
 }

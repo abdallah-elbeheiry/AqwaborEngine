@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/abdallah-elbeheiry/AqwaborEngine/camera"
+	"github.com/abdallah-elbeheiry/AqwaborEngine/ecs"
 	"github.com/abdallah-elbeheiry/AqwaborEngine/input"
 	gogpuinput "github.com/abdallah-elbeheiry/AqwaborEngine/input/backend/gogpu"
 	"github.com/abdallah-elbeheiry/AqwaborEngine/logx"
@@ -42,7 +43,7 @@ func main() {
 		}
 	}
 
-	mode := flag.String("mode", "world", "demo mode: world (vector map), ui (widget shell + image), window (ECS sprite demo)")
+	mode := flag.String("mode", "world", "demo mode: world (vector map ECS), ui (widget shell + image)")
 	flag.Parse()
 
 	switch *mode {
@@ -147,21 +148,45 @@ func runWorldDemo() {
 	}
 	logx.Info("world loaded", "geoms", world.GeomCount, "verts", len(world.Coords)/2, "layers", len(world.Layers))
 
-	cam := camera.NewCamera()
-	cam.Fit(geometry.Sz(360, 180), geometry.Sz(1280, 720))
-	cam.SetPosition(geometry.Pt(0, 0))
-	cam.SetZoomLimits(0.01, 1000)
+	// --- ECS setup ---
+	w := ecs.NewWorld()
+	camera.MustRegisterECS(w)
+	render.MustRegisterECS(w)
+	maprender.MustRegisterECS(w)
 
-	rend := maprender.NewRenderer(world, cam, nil)
+	// Camera entity — source of truth for all view state.
+	// Matches old behaviour: Fit centres, then position reset to origin.
+	vp := geometry.Sz(1280, 720)
+	camE := w.Create()
+	ecs.MustAdd[camera.Camera](w, camE, camera.Camera{
+		MinZoom: 0.01,
+		MaxZoom: 1000,
+		Active:  1,
+	})
+	c, _ := ecs.Get[camera.Camera](w, camE)
+	c.Fit(360, 180, vp.Width, vp.Height)
+	c.X = 0
+	c.Y = 0
 
+	// Map scene entity — clear colour + world scale.
+	mapE := w.Create()
+	ecs.MustAdd[maprender.MapScene](w, mapE, maprender.MapScene{
+		ClearR:     world.Background.R,
+		ClearG:     world.Background.G,
+		ClearB:     world.Background.B,
+		ClearA:     world.Background.A,
+		WorldScale: float32(world.Scale),
+		Active:     1,
+	})
+
+	// Renderer — CPU fill triangulation in NewRenderer, GPU mesh built later.
+	rend := maprender.NewRenderer(world, 1, nil)
+	maprender.Bind(mapE, rend)
+
+	// --- Input ---
 	app := win.App()
 	mgr := input.NewManager(gogpuinput.NewBackend(app))
 
-	// Scroll-wheel zoom is captured on the main thread (gogpu's OnScroll
-	// callback) into a small accumulator. Reading gogpu's transient frame-scroll
-	// state from inside OnDraw races with its per-frame reset on the main
-	// thread, so it is always observed as 0 there. The accumulator survives the
-	// thread boundary and is drained once per frame below.
 	var scrollMu sync.Mutex
 	var scrollDy float32
 	app.EventSource().OnScroll(func(_, dy float64) {
@@ -173,26 +198,45 @@ func runWorldDemo() {
 	panAction := mgr.Action("pan")
 	mgr.BindMouseButton(panAction, input.MouseButtonLeft)
 	panAction.OnDrag(func(dx, dy float64, _ input.Context) {
-		cam.Pan(geometry.Pt(float32(dx), float32(dy)))
+		c, ok := ecs.Get[camera.Camera](w, camE)
+		if !ok {
+			return
+		}
+		c.Pan(float32(dx), float32(dy))
 	})
 
 	zoomInAction := mgr.Action("zoom_in")
 	mgr.BindKey(zoomInAction, input.KeyEqual)
 	zoomInAction.OnPressed(func(_ input.Context) {
-		cam.SetZoom(cam.Zoom() * 1.1)
+		c, ok := ecs.Get[camera.Camera](w, camE)
+		if !ok {
+			return
+		}
+		c.Zoom *= 1.1
+		camera.ClampZoom(c)
 	})
 
 	zoomOutAction := mgr.Action("zoom_out")
 	mgr.BindKey(zoomOutAction, input.KeyMinus)
 	zoomOutAction.OnPressed(func(_ input.Context) {
-		cam.SetZoom(cam.Zoom() / 1.1)
+		c, ok := ecs.Get[camera.Camera](w, camE)
+		if !ok {
+			return
+		}
+		c.Zoom /= 1.1
+		camera.ClampZoom(c)
 	})
 
 	resetAction := mgr.Action("reset")
 	mgr.BindKey(resetAction, input.KeyR)
 	resetAction.OnPressed(func(_ input.Context) {
-		cam.Fit(geometry.Sz(360, 180), geometry.Sz(1280, 720))
-		cam.SetPosition(geometry.Pt(0, 0))
+		c, ok := ecs.Get[camera.Camera](w, camE)
+		if !ok {
+			return
+		}
+		c.Fit(360, 180, float32(vp.Width), float32(vp.Height))
+		c.X = 0
+		c.Y = 0
 	})
 
 	var lastFrame time.Time
@@ -207,36 +251,40 @@ func runWorldDemo() {
 
 		mgr.Update(dt)
 
-		vp := geometry.Sz(1280, 720)
-
 		if gfx == nil {
 			gfx = render.New(win.DeviceProvider())
+			if c, ok := ecs.Get[camera.Camera](w, camE); ok {
+				rend.SetRefZoom(c.Zoom)
+			}
 			rend.SetRenderer(gfx.Renderer())
 		}
 
-		// Apply accumulated scroll-wheel zoom toward the cursor.
+		// Drain accumulated scroll-wheel zoom toward cursor.
 		scrollMu.Lock()
 		sd := scrollDy
 		scrollDy = 0
 		scrollMu.Unlock()
 		if sd != 0 {
-			// gogpu reports scroll-up as negative dy, so scroll up = zoom in.
-			factor := float32(1.1)
-			if sd < 0 {
-				factor = 1 / 1.1
+			c, ok := ecs.Get[camera.Camera](w, camE)
+			if ok {
+				factor := float32(1.1)
+				if sd < 0 {
+					factor = 1 / 1.1
+				}
+				mx, my := app.Input().Mouse().Position()
+				c.ZoomAt(factor, float32(mx), float32(my), float32(vp.Width), float32(vp.Height))
 			}
-			mx, my := app.Input().Mouse().Position()
-			cam.ZoomAt(factor, geometry.Pt(mx, my), vp)
 		}
 
+		// Read components → build view-projection → draw.
+		cam, _ := ecs.Get[camera.Camera](w, camE)
+		scene, _ := ecs.Get[maprender.MapScene](w, mapE)
+
 		rend.SetViewport(vp)
-
-		vpMat := render.ComputeViewProj(cam, vp, float32(world.Scale))
-		gfx.SetCamera(vpMat, vp.Width, vp.Height)
-
-		bg := world.Background
-		gfx.Begin(dc, render.Clear{R: bg.R, G: bg.G, B: bg.B, A: bg.A})
-		rend.Draw()
+		vpMat := render.ViewProjMap(*cam, float32(vp.Width), float32(vp.Height), scene.WorldScale)
+		gfx.SetCamera(vpMat, float32(vp.Width), float32(vp.Height))
+		gfx.Begin(dc, render.Clear{R: scene.ClearR, G: scene.ClearG, B: scene.ClearB, A: scene.ClearA})
+		maprender.DrawECS(w, mapE)
 		gfx.End()
 	}); err != nil {
 		logx.Fatalf("window run failed: %v", err)

@@ -31,7 +31,7 @@ aqwabor/
 │   ├── stroke.go          — StrokeSegment, BuildSegments (polylines → GPU instances)
 │   ├── strokebuffer.go    — StrokeBuffer: GPU buffer for stroke segments
 │   ├── strokepipeline.go  — StrokePipeline: screen-space-width polylines
-│   ├── mapmesh.go         — MapMesh, BuildMapMesh, ComputeViewProj
+│   ├── mapmesh.go         — MapMesh, BuildMapMesh
 │   ├── mapstroke.go       — BuildMapStrokes (map polylines → stroke segments)
 │   ├── mapvertex.go       — MapVertex: compact 12-byte int32 + unorm8x4
 │   ├── mappipeline.go     — MapPipeline: camera uniform for map geometry
@@ -46,9 +46,12 @@ aqwabor/
 │       ├── stroke_frag.wgsl    — stroke fragment output
 │       ├── map.wgsl            — map fill vertex shader (int32 coords)
 │       └── fragment.wgsl       — shared fragment passthrough
-├── camera/                — 2D camera with pan/zoom + ECS Camera2D component
+├── camera/                — 2D camera with pan/zoom + ECS Camera component
 ├── mapdata/               — JSON world data loading
 ├── maprender/             — map data → fill/stroke batches via render APIs
+│   ├── renderer.go        — Renderer: fill triangulation + GPU mesh/stroke build
+│   ├── ecs.go             — MapScene component, RegisterECS, Bind/Unbind, DrawECS
+│   └── documentation.md   — maprender API reference
 ├── mapview/               — pannable/zoomable image widget (CPU-scaled)
 ├── ui/                    — thin façade over gogpu/ui (+ desktop, gg)
 │   ├── ui.go              — Config, App, New, SetRoot, Run, Close, GogpuApp
@@ -64,7 +67,7 @@ aqwabor/
 ```
 
 Build: `CGO_ENABLED=0 go run .`  
-Modes: `-mode=world` (vector map), `-mode=ui` (widget shell), `-mode=window` (ECS sprite demo)
+Modes: `-mode=world` (vector map ECS), `-mode=ui` (widget shell)
 
 ---
 
@@ -538,28 +541,41 @@ ECS primitives live **next to the subsystem that owns them**, not in a separate
 `engine/` package. Each package registers its own component types:
 
 ```go
-render.MustRegisterECS(w)   // Transform, Color, Sprite, ClearColor
-camera.MustRegisterECS(w)   // Camera2D
+camera.MustRegisterECS(w)    // Camera (single source of truth for view state)
+render.MustRegisterECS(w)    // Transform, Color, Sprite, ClearColor
+maprender.MustRegisterECS(w) // MapScene
 ```
 
-Frame loop:
+### World map demo pattern
 
 ```go
 // startup
 w := ecs.NewWorld()
-render.MustRegisterECS(w)
 camera.MustRegisterECS(w)
-// ... spawn entities ...
+render.MustRegisterECS(w)
+maprender.MustRegisterECS(w)
+camE := w.Create()  // + Camera component
+mapE := w.Create()  // + MapScene component
+maprender.Bind(mapE, rend)
 
-// each frame
-cam, _ := ecs.Get[camera.Camera2D](w, camEntity)
-vpMat := camera.ViewProjFrom(*cam, viewW, viewH)
-render.ExtractSprites(w, batch)
-render.DrawWorld(gfx, batch, dc, clear, vpMat, viewW, viewH, bounds, 64)
+// each frame — input writes into Camera, frame reads components
+cam, _ := ecs.Get[camera.Camera](w, camE)
+scene, _ := ecs.Get[maprender.MapScene](w, mapE)
+cam.Pan(dx, dy)                              // or ZoomAt / Fit
+camera.ClampZoom(cam)
+vpMat := render.ViewProjMap(*cam, vpW, vpH, scene.WorldScale)
+gfx.SetCamera(vpMat, vpW, vpH)
+gfx.Begin(dc, render.Clear{R: scene.ClearR, ...})
+maprender.DrawECS(w, mapE)
+gfx.End()
 ```
 
-See [`render/documentation.md`](render/documentation.md) and
-[`camera/documentation.md`](camera/documentation.md) for full API.
+Map geometry is **never** stored in ECS components — it lives in `mapdata` +
+GPU buffers, bound to entities via `maprender.Bind`.
+
+See package docs: [`render/documentation.md`](render/documentation.md),
+[`camera/documentation.md`](camera/documentation.md),
+[`maprender/documentation.md`](maprender/documentation.md).
 
 ---
 
