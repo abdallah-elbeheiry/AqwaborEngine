@@ -28,6 +28,7 @@ type Renderer struct {
 
 	instPipe   *Pipeline       // instanced draws
 	strokePipe *StrokePipeline // screen-space-width polylines
+	mapPipe    *MapPipeline    // map fill geometry (optional)
 
 	stats FrameStats
 }
@@ -253,6 +254,10 @@ func (r *Renderer) CommandEncoder() *wgpu.CommandEncoder { return r.enc }
 // CameraBuffer returns the instanced pipeline's camera uniform buffer.
 // Used by the GPU facade for compute cull binding.
 func (r *Renderer) CameraBuffer() *wgpu.Buffer { return r.instPipe.CameraBuffer() }
+
+// SetMapPipeline registers a map pipeline so SetCamera can update its camera
+// uniform alongside the sprite and stroke pipelines.
+func (r *Renderer) SetMapPipeline(p *MapPipeline) { r.mapPipe = p }
 
 // Release releases GPU resources.
 func (r *Renderer) Release() {

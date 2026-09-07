@@ -20,45 +20,43 @@ gfx.SetCamera(viewProj, viewportW, viewportH)
 gfx.End()
 ```
 
+`SetCamera` writes a single shared camera uniform used by sprite, stroke,
+and map pipelines.
+
 ### Sprites / instances (primary path)
 
 ```go
-// Create a mesh (shared unit quad).
-quad := render.NewUnitQuad(gfx.Device(), gfx.Queue())
-
-// Create an instance buffer.
-instances := render.NewInstanceBuffer(gfx.Device(), capacity)
+batch := gfx.Sprites(capacity)
 
 // Write instance data.
-instances.WriteAll([]render.InstanceData{{
+batch.Set(index, render.InstanceData{
     Position: [2]float32{x, y},
     Scale:    [2]float32{w, h},
     Color:    [4]float32{r, g, b, a},
-}})
+})
+batch.SetAll(sprites) // dense write, one GPU upload
 
 // Draw (CPU → GPU, all instances visible).
-gfx.DrawInstanced(quad, instances)
+gfx.DrawSprites(batch)
 ```
 
 ### GPU compute culling + indirect draw
 
 ```go
 // Draw only instances visible within viewBounds.
-// The CullPipeline is managed internally; game code does not touch it.
-gfx.DrawSpritesCulled(quad, instances, render.ViewBounds{
+gfx.DrawSpritesCulled(batch, render.ViewBounds{
     MinX: -640, MinY: -360,
     MaxX:  640, MaxY:  360,
 })
 ```
 
 The cull pass runs as a compute shader on the GPU:
-1. Reads all instances from the InstanceBuffer.
+1. Reads all instances from the batch's InstanceBuffer.
 2. Tests each against the camera frustum + optional world AABB.
 3. Compacts visible survivors into an output buffer.
 4. Draws with `DrawIndexedIndirect` using the GPU-written instance count.
 
-When instances are off-screen, fewer are drawn than submitted. Stats
-(`gfx.Stats().Instances`) reflect the actual drawn count.
+When instances are off-screen, fewer are drawn than submitted.
 
 ### Strokes (polylines: map outlines, paths, debug)
 
@@ -73,21 +71,14 @@ stroke vertex shader.
 
 ### Map fills (static geometry)
 
-```go
-gfx.DrawMapMesh(mapMesh, mapPipeline)
-```
-
-Pre-built triangulated map geometry with int32 world-space positions and
-quantized colors. Used by `maprender`.
+Map fills are drawn through the Renderer directly (not through the GPU
+facade's public API). The map pipeline shares the same camera uniform
+as sprite and stroke pipelines, updated by `GPU.SetCamera`.
 
 ### Accessors
 
 ```go
-gfx.Device()          // *wgpu.Device
-gfx.Queue()           // *wgpu.Queue
-gfx.SurfaceFormat()   // gputypes.TextureFormat
-gfx.Stats()           // render.FrameStats{DrawCalls, Instances, Triangles}
-gfx.Renderer()        // *render.Renderer (escape hatch for maprender)
+gfx.Stats()    // render.FrameStats{DrawCalls, Instances, Triangles}
 ```
 
 ### Cleanup
@@ -97,6 +88,11 @@ gfx.Release()
 ```
 
 ## Types
+
+### SpriteBatch
+
+Convenience wrapper around InstanceBuffer. Created via `gfx.Sprites(cap)`.
+Provides `Set`, `SetAll`, `Count`, `Reset`. Hides raw mesh/buffer management.
 
 ### InstanceData (64 bytes)
 
@@ -113,37 +109,23 @@ Per-instance data layout. Stride matches WGSL storage alignment (64 bytes).
 
 ### Mesh
 
-Shared immutable geometry (vertex + index buffers). Create with
-`NewMesh(dev, queue, vertices, indices)` or `NewUnitQuad(dev, queue)`.
-
-### InstanceBuffer
-
-Long-lived GPU buffer with dirty-range tracking. Supports sparse `Write` for
-per-slot updates or dense `WriteAll`/`WriteAt` for full-buffer rewrites.
-`Flush` uploads dirty ranges to the GPU; `DrawInstanced` calls it
-automatically.
+Shared immutable geometry (vertex + index buffers). Created internally by
+`GPU.Sprites()`. Not part of the public demo API.
 
 ### StrokeSegment (72 bytes)
 
 Per-segment data for GPU-expanded polylines. The vertex shader expands each
 segment into a screen-space quad with miter joins.
 
-### CullPipeline (internal)
+## Shaders (5 files)
 
-GPU compute culling pipeline. Created lazily by `GPU.DrawSpritesCulled`.
-Not part of the public API — game code should not import or reference this type.
-
-## Shaders
-
-| Shader           | Purpose                                      |
-|------------------|----------------------------------------------|
-| `instanced.wgsl` | Instanced quads: mesh + instance + camera    |
-| `cull.wgsl`      | Compute: frustum/AABB cull + compact         |
-| `stroke.wgsl`    | Segment expansion, screen-space width        |
-| `map.wgsl`       | Map fills: int32 positions + quantized color |
-| `fragment.wgsl`  | Shared fragment passthrough (map pipeline)    |
-| `instanced_frag.wgsl` | Instanced fragment output              |
-| `stroke_frag.wgsl`    | Stroke fragment output                 |
+| File              | Purpose                                      |
+|-------------------|----------------------------------------------|
+| `cull.wgsl`       | Compute: frustum/AABB cull + compact         |
+| `instanced.wgsl`  | Sprite/instance vertex: mesh + transform     |
+| `stroke.wgsl`     | Stroke vertex: screen-space expansion        |
+| `map.wgsl`        | Map fill vertex: int32 positions + camera    |
+| `fragment.wgsl`   | Shared fragment passthrough for all pipelines |
 
 ## ECS Integration
 
@@ -151,7 +133,8 @@ Components remain PoD only (no GPU pointers). A small system or demo
 function queries transforms and writes into render batches:
 
 ```go
-// System: query transforms → batch.Set → DrawSprites
+batch := gfx.Sprites(1024)
+i := 0
 query.ForEach(func(e ecs.Entity) {
     t := ecs.Get[Transform](e)
     s := ecs.Get[SpriteStyle](e)
@@ -160,6 +143,8 @@ query.ForEach(func(e ecs.Entity) {
         Scale:    s.Size,
         Color:    s.Color,
     })
+    i++
 })
-gfx.DrawInstanced(quad, batch)
+batch.SetCount(i)
+gfx.DrawSprites(batch)
 ```

@@ -1,8 +1,9 @@
 struct Camera {
-    view_proj : mat4x4<f32>,
+    viewProj : mat4x4<f32>,
+    viewport : vec2<f32>,
 };
 
-@group(0) @binding(0) var<uniform> cam : Camera;
+@group(0) @binding(0) var<uniform> camera : Camera;
 
 struct VSIn {
     @location(0) pos : vec2<i32>,
@@ -17,12 +18,7 @@ struct VSOut {
 @vertex
 fn vs_main(in : VSIn) -> VSOut {
     var out : VSOut;
-    out.pos = cam.view_proj * vec4<f32>(f32(in.pos.x), f32(in.pos.y), 0.0, 1.0);
+    out.pos = camera.viewProj * vec4<f32>(f32(in.pos.x), f32(in.pos.y), 0.0, 1.0);
     out.color = in.color;
     return out;
-}
-
-@fragment
-fn fs_main(in : VSOut) -> @location(0) vec4<f32> {
-    return in.color;
 }
