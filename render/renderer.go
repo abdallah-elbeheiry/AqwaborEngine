@@ -200,6 +200,9 @@ func (r *Renderer) EndFrame() {
 // --- Instanced draws ---
 
 // DrawInstanced submits an instanced draw command.
+// It flushes pending dirty ranges first, so callers do not need a separate
+// Flush call (an explicit Flush beforehand is still fine and not duplicated:
+// Flush is a no-op when no dirty ranges remain).
 func (r *Renderer) DrawInstanced(mesh *Mesh, instances *InstanceBuffer) {
 	if r.pass == nil || !r.frameOpen {
 		return
@@ -207,6 +210,7 @@ func (r *Renderer) DrawInstanced(mesh *Mesh, instances *InstanceBuffer) {
 	if instances.Count() == 0 {
 		return
 	}
+	instances.Flush(r.queue)
 
 	r.pass.SetPipeline(r.instPipe.Pipeline())
 	r.pass.SetBindGroup(0, r.instPipe.BindGroup(), nil)
@@ -220,16 +224,21 @@ func (r *Renderer) DrawInstanced(mesh *Mesh, instances *InstanceBuffer) {
 	r.stats.Triangles += int(mesh.IndexCount/3) * instances.Count()
 }
 
-// DrawInstancedIndirect submits an indirect instanced draw.
-func (r *Renderer) DrawInstancedIndirect(mesh *Mesh, indirectBuf *wgpu.Buffer) {
+// DrawInstancedIndirect submits an indirect instanced draw over culled data.
+// The cull compute pass compacts survivors into cull.OutputBuffer() starting
+// at slot 0 (FirstInstance = 0), so that buffer is bound as the instance
+// vertex input and indirectBuf supplies the GPU-written instance count.
+// Encode the cull dispatch before the render pass that calls this.
+func (r *Renderer) DrawInstancedIndirect(mesh *Mesh, cull *CullPipeline) {
 	if r.pass == nil || !r.frameOpen {
 		return
 	}
 	r.pass.SetPipeline(r.instPipe.Pipeline())
 	r.pass.SetBindGroup(0, r.instPipe.BindGroup(), nil)
 	r.pass.SetVertexBuffer(0, mesh.VertexBuffer, 0)
+	r.pass.SetVertexBuffer(1, cull.OutputBuffer(), 0)
 	r.pass.SetIndexBuffer(mesh.IndexBuffer, gputypes.IndexFormatUint32, 0)
-	r.pass.DrawIndexedIndirect(indirectBuf, 0)
+	r.pass.DrawIndexedIndirect(cull.IndirectBuffer(), 0)
 	r.stats.DrawCalls++
 }
 

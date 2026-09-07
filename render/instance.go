@@ -4,14 +4,18 @@
 package render
 
 import (
+	"unsafe"
+
 	"github.com/gogpu/gputypes"
 	"github.com/gogpu/wgpu"
 )
 
 // InstanceData is the per-instance data layout for instanced rendering.
-// Field ordering matches WGSL alignment rules: vec4 (color) at offset 32
-// requires 16-byte alignment, so Rotation (4 bytes) at offset 16 fills the
-// gap before the vec4. Total: 60 bytes (WGSL struct size).
+//
+// The stride is 64 bytes: the WGSL struct ends with `layer: f32` after a
+// `vec2`, so in a `array<InstanceData>` storage buffer the struct alignment
+// rounds the size up to a multiple of 16 (60 -> 64). The trailing Pad keeps
+// the Go struct, the vertex stride, and the WGSL storage stride identical.
 type InstanceData struct {
 	Position [2]float32 // offset 0,  8 bytes
 	Scale    [2]float32 // offset 8,  8 bytes
@@ -20,9 +24,20 @@ type InstanceData struct {
 	Color    [4]float32 // offset 32, 16 bytes
 	UVOffset [2]float32 // offset 48, 8 bytes
 	Layer    float32    // offset 56, 4 bytes
+	Pad      float32    // offset 60, 4 bytes padding (16-byte struct alignment)
 }
 
-const instanceDataSize = 60 // bytes, must match sizeof(InstanceData)
+const instanceDataSize = 64 // bytes, must match sizeof(InstanceData) and WGSL stride
+
+// Compile-time guard: array of negative length fails to build if stride drifts.
+var _ [instanceDataSize - 64]byte
+var _ [64 - instanceDataSize]byte
+
+func init() {
+	if unsafe.Sizeof(InstanceData{}) != instanceDataSize {
+		panic("render: sizeof(InstanceData) != instanceDataSize")
+	}
+}
 
 // InstanceBufferLayout describes the vertex buffer layout for instanced attributes.
 // Offsets must match the Go struct layout (which matches WGSL alignment).

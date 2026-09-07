@@ -162,6 +162,7 @@ func (r *Renderer) Draw(dc *gogpu.Context) error {
 		return err
 	}
 	r.ren.DrawMapMesh(r.mapMesh, r.mapPipe)
+	r.stats.Triangles = r.ren.Stats().Triangles
 	r.ren.EndFrame()
 
 	if now := time.Now(); now.Sub(r.lastLog) >= r.logEvery {

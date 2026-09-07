@@ -81,7 +81,7 @@ func NewEmitter(dev *wgpu.Device, cfg EmitterConfig) *Emitter {
 	return &Emitter{
 		cfg:       cfg,
 		particles: make([]Particle, cfg.MaxParticles),
-		mesh:      render.NewUnitQuad(dev),
+		mesh:      render.NewUnitQuad(dev, dev.Queue()),
 		buf:       render.NewInstanceBuffer(dev, cfg.MaxParticles),
 	}
 }
