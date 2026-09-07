@@ -65,6 +65,9 @@ func NewWindow(cfg WindowConfig) (*Window, error) {
 
 func (w *Window) App() *gogpu.App { return w.app }
 
+// DeviceProvider returns the GPU device provider for the render package.
+func (w *Window) DeviceProvider() gogpu.DeviceProvider { return w.app.DeviceProvider() }
+
 func (w *Window) Run(onDraw func(dc *gogpu.Context)) error {
 	if w.app == nil {
 		return nil

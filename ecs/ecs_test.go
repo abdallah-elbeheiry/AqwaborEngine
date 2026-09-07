@@ -19,15 +19,15 @@ type Health struct {
 
 // --- Registration ---
 
-func TestRegister(t *testing.T) {
+func TestMustRegister(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
-	Register[Velocity](w)
-	Register[Health](w)
-	Register[Position](w) // idempotent
+	MustRegister[Position](w)
+	MustRegister[Velocity](w)
+	MustRegister[Health](w)
+	MustRegister[Position](w) // idempotent
 }
 
-func TestRegisterUnregistered(t *testing.T) {
+func TestMustRegisterUnregistered(t *testing.T) {
 	w := NewWorld()
 	e := w.Create()
 
@@ -65,7 +65,7 @@ func TestDestroyAlreadyDead(t *testing.T) {
 
 func TestDestroyWithCascade(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
+	MustRegister[Position](w)
 	e := w.Create()
 	MustAdd[Position](w, e, Position{X: 1, Y: 2})
 	w.Destroy(e, true)
@@ -78,7 +78,7 @@ func TestDestroyWithCascade(t *testing.T) {
 
 func TestAddGetHas(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
+	MustRegister[Position](w)
 
 	e := w.Create()
 	MustAdd[Position](w, e, Position{X: 3, Y: 4})
@@ -96,9 +96,9 @@ func TestAddGetHas(t *testing.T) {
 
 func TestAddMultipleComponents(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
-	Register[Velocity](w)
-	Register[Health](w)
+	MustRegister[Position](w)
+	MustRegister[Velocity](w)
+	MustRegister[Health](w)
 
 	e := w.Create()
 	MustAdd[Position](w, e, Position{X: 1, Y: 2})
@@ -131,7 +131,7 @@ func TestAddMultipleComponents(t *testing.T) {
 
 func TestAddDuplicateIgnored(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
+	MustRegister[Position](w)
 
 	e := w.Create()
 	MustAdd[Position](w, e, Position{X: 1, Y: 2})
@@ -145,7 +145,7 @@ func TestAddDuplicateIgnored(t *testing.T) {
 
 func TestHasDeadEntity(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
+	MustRegister[Position](w)
 
 	e := w.Create()
 	w.Destroy(e, false)
@@ -156,7 +156,7 @@ func TestHasDeadEntity(t *testing.T) {
 
 func TestGetDeadEntity(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
+	MustRegister[Position](w)
 
 	e := w.Create()
 	w.Destroy(e, false)
@@ -168,8 +168,8 @@ func TestGetDeadEntity(t *testing.T) {
 
 func TestRemove(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
-	Register[Velocity](w)
+	MustRegister[Position](w)
+	MustRegister[Velocity](w)
 
 	e := w.Create()
 	MustAdd[Position](w, e, Position{X: 1, Y: 2})
@@ -186,7 +186,7 @@ func TestRemove(t *testing.T) {
 
 func TestRemoveNonExistent(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
+	MustRegister[Position](w)
 
 	e := w.Create()
 	err := Remove[Position](w, e)
@@ -197,7 +197,7 @@ func TestRemoveNonExistent(t *testing.T) {
 
 func TestRemoveDeadEntity(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
+	MustRegister[Position](w)
 
 	e := w.Create()
 	w.Destroy(e, false)
@@ -209,7 +209,7 @@ func TestRemoveDeadEntity(t *testing.T) {
 
 func TestMutateComponent(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
+	MustRegister[Position](w)
 
 	e := w.Create()
 	MustAdd[Position](w, e, Position{X: 1, Y: 2})
@@ -228,8 +228,8 @@ func TestMutateComponent(t *testing.T) {
 
 func TestDestroyReleasesComponents(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
-	Register[Health](w)
+	MustRegister[Position](w)
+	MustRegister[Health](w)
 
 	e := w.Create()
 	MustAdd[Position](w, e, Position{X: 1, Y: 2})
@@ -248,7 +248,7 @@ func TestDestroyReleasesComponents(t *testing.T) {
 
 func TestSharingHandle(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
+	MustRegister[Position](w)
 
 	h := MustCreate[Position](w, Position{X: 5, Y: 5})
 
@@ -276,7 +276,7 @@ func TestSharingHandle(t *testing.T) {
 
 func TestSharingDetach(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
+	MustRegister[Position](w)
 
 	h := MustCreate[Position](w, Position{X: 7, Y: 7})
 
@@ -298,7 +298,7 @@ func TestSharingDetach(t *testing.T) {
 
 func TestAttachDeadEntity(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
+	MustRegister[Position](w)
 
 	h := MustCreate[Position](w, Position{X: 1, Y: 1})
 	e := w.Create()
@@ -312,7 +312,7 @@ func TestAttachDeadEntity(t *testing.T) {
 
 func TestDetachNonExistent(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
+	MustRegister[Position](w)
 
 	e := w.Create()
 	MustDetach[Position](w, e)
@@ -320,7 +320,7 @@ func TestDetachNonExistent(t *testing.T) {
 
 func TestDestroyHandle(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
+	MustRegister[Position](w)
 
 	h := MustCreate[Position](w, Position{X: 1, Y: 1})
 	DestroyHandle(w, h)
@@ -336,8 +336,8 @@ func TestDestroyHandle(t *testing.T) {
 
 func TestQuery(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
-	Register[Velocity](w)
+	MustRegister[Position](w)
+	MustRegister[Velocity](w)
 
 	e1 := w.Create()
 	e2 := w.Create()
@@ -368,7 +368,7 @@ func TestQuery(t *testing.T) {
 
 func TestQueryEmpty(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
+	MustRegister[Position](w)
 
 	q := NewQuery[Position](w)
 	count := 0
@@ -382,7 +382,7 @@ func TestQueryEmpty(t *testing.T) {
 
 func TestQueryMutates(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
+	MustRegister[Position](w)
 
 	for i := range 10 {
 		e := w.Create()
@@ -406,9 +406,9 @@ func TestQueryMutates(t *testing.T) {
 
 func TestGroup(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
-	Register[Velocity](w)
-	Register[Health](w)
+	MustRegister[Position](w)
+	MustRegister[Velocity](w)
+	MustRegister[Health](w)
 
 	e1 := w.Create()
 	e2 := w.Create()
@@ -434,8 +434,8 @@ func TestGroup(t *testing.T) {
 
 func TestGroupEmpty(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
-	Register[Velocity](w)
+	MustRegister[Position](w)
+	MustRegister[Velocity](w)
 
 	g := NewGroup(w, Position{}, Velocity{})
 	count := 0
@@ -449,9 +449,9 @@ func TestGroupEmpty(t *testing.T) {
 
 func TestGroupThreeComponents(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
-	Register[Velocity](w)
-	Register[Health](w)
+	MustRegister[Position](w)
+	MustRegister[Velocity](w)
+	MustRegister[Health](w)
 
 	e1 := w.Create()
 	e2 := w.Create()
@@ -495,7 +495,7 @@ func TestEntityRecycling(t *testing.T) {
 
 func TestQueryLargeBatch(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
+	MustRegister[Position](w)
 
 	for i := range 100 {
 		e := w.Create()
@@ -521,7 +521,7 @@ func TestQueryLargeBatch(t *testing.T) {
 
 func TestDetachCascadeDestroy(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
+	MustRegister[Position](w)
 
 	h := MustCreate[Position](w, Position{X: 1, Y: 1})
 
@@ -552,8 +552,8 @@ func TestDetachCascadeDestroy(t *testing.T) {
 
 func TestGroupOf(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
-	Register[Velocity](w)
+	MustRegister[Position](w)
+	MustRegister[Velocity](w)
 
 	e1 := w.Create()
 	e2 := w.Create()
@@ -583,7 +583,7 @@ func TestGroupOf(t *testing.T) {
 
 func TestGroupOfSkipsDead(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
+	MustRegister[Position](w)
 
 	e1 := w.Create()
 	e2 := w.Create()
@@ -599,7 +599,7 @@ func TestGroupOfSkipsDead(t *testing.T) {
 
 func TestGroupFrom(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
+	MustRegister[Position](w)
 
 	e1 := w.Create()
 	e2 := w.Create()
@@ -617,7 +617,7 @@ func TestGroupFrom(t *testing.T) {
 
 func TestGroupAdd(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
+	MustRegister[Position](w)
 
 	e1 := w.Create()
 	e2 := w.Create()
@@ -642,7 +642,7 @@ func TestGroupAdd(t *testing.T) {
 
 func TestGroupAddSkipsDead(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
+	MustRegister[Position](w)
 
 	e1 := w.Create()
 	MustAdd[Position](w, e1, Position{X: 1, Y: 1})
@@ -657,7 +657,7 @@ func TestGroupAddSkipsDead(t *testing.T) {
 
 func TestGroupAddEntities(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
+	MustRegister[Position](w)
 
 	e1 := w.Create()
 	e2 := w.Create()
@@ -675,7 +675,7 @@ func TestGroupAddEntities(t *testing.T) {
 
 func TestGroupRemove(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
+	MustRegister[Position](w)
 
 	e1 := w.Create()
 	e2 := w.Create()
@@ -699,7 +699,7 @@ func TestGroupRemove(t *testing.T) {
 
 func TestGroupClear(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
+	MustRegister[Position](w)
 
 	e1 := w.Create()
 	e2 := w.Create()
@@ -715,7 +715,7 @@ func TestGroupClear(t *testing.T) {
 
 func TestGroupFilter(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
+	MustRegister[Position](w)
 
 	e1 := w.Create()
 	e2 := w.Create()
@@ -744,7 +744,7 @@ func TestGroupFilter(t *testing.T) {
 
 func TestGroupFilterEmpty(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
+	MustRegister[Position](w)
 
 	e1 := w.Create()
 	MustAdd[Position](w, e1, Position{X: 1, Y: 1})
@@ -758,7 +758,7 @@ func TestGroupFilterEmpty(t *testing.T) {
 
 func TestGroupFilterPreservesOriginal(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
+	MustRegister[Position](w)
 
 	e1 := w.Create()
 	e2 := w.Create()
@@ -779,8 +779,8 @@ func TestGroupFilterPreservesOriginal(t *testing.T) {
 
 func TestGroupConvertsOnAdd(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
-	Register[Velocity](w)
+	MustRegister[Position](w)
+	MustRegister[Velocity](w)
 
 	e1 := w.Create()
 	e2 := w.Create()
@@ -809,7 +809,7 @@ func TestGroupConvertsOnAdd(t *testing.T) {
 
 func TestQueryLen(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
+	MustRegister[Position](w)
 
 	for i := range 5 {
 		e := w.Create()
@@ -825,7 +825,7 @@ func TestQueryLen(t *testing.T) {
 
 func TestQueryForEachUntil(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
+	MustRegister[Position](w)
 
 	for i := range 10 {
 		e := w.Create()
@@ -849,7 +849,7 @@ func TestQueryForEachUntil(t *testing.T) {
 
 func TestQueryFilter(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
+	MustRegister[Position](w)
 
 	for i := range 10 {
 		e := w.Create()
@@ -873,7 +873,7 @@ func TestQueryFilter(t *testing.T) {
 
 func TestQueryFilterForEach(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
+	MustRegister[Position](w)
 
 	for i := range 10 {
 		e := w.Create()
@@ -898,7 +898,7 @@ func TestQueryFilterForEach(t *testing.T) {
 
 func TestQueryCollect(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
+	MustRegister[Position](w)
 
 	e1 := w.Create()
 	e2 := w.Create()
@@ -915,7 +915,7 @@ func TestQueryCollect(t *testing.T) {
 
 func TestQueryGroup(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
+	MustRegister[Position](w)
 
 	for i := range 5 {
 		e := w.Create()
@@ -930,8 +930,8 @@ func TestQueryGroup(t *testing.T) {
 
 func TestQueryGroupFromFilter(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
-	Register[Velocity](w)
+	MustRegister[Position](w)
+	MustRegister[Velocity](w)
 
 	for i := range 10 {
 		e := w.Create()
@@ -964,7 +964,7 @@ func TestQueryGroupFromFilter(t *testing.T) {
 
 func TestQueryAny(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
+	MustRegister[Position](w)
 
 	e := w.Create()
 	MustAdd[Position](w, e, Position{X: 42, Y: 99})
@@ -980,7 +980,7 @@ func TestQueryAny(t *testing.T) {
 
 func TestQueryAnyEmpty(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
+	MustRegister[Position](w)
 
 	_, _, ok := NewQuery[Position](w).Any()
 	if ok {
@@ -990,7 +990,7 @@ func TestQueryAnyEmpty(t *testing.T) {
 
 func TestQueryCountIf(t *testing.T) {
 	w := NewWorld()
-	Register[Position](w)
+	MustRegister[Position](w)
 
 	for i := range 10 {
 		e := w.Create()
