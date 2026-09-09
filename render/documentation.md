@@ -85,6 +85,30 @@ Growing the batch past the cull pipeline's capacity builds a larger pipeline and
 retires the old one for three frames before releasing it, because a submitted
 frame may still be reading its buffers.
 
+### Cells (the dense layer: one colour per grid cell)
+
+```go
+cells := gfx.Subcells(capacity)
+gfx.SetRamp(&table)        // once; every cell indexes it
+gfx.SetCellSize(2, 2)      // world units, shared by the grid
+
+cells.WriteAll(instances)
+gfx.DrawSubcells(cells)
+```
+
+`SubcellInstance` is 16 bytes against the sprite path's 64: a world position and
+a palette index, with the colour coming from a ramp table uploaded once and the
+size from a uniform, because a grid shares one size. At 250,000 instances that
+is 3.9 MB a frame rather than 15.6.
+
+A palette index of zero draws nothing, so a cell can be cleared without being
+taken out of the buffer. How materials and rows map onto a flat index belongs to
+the game; the engine only indexes.
+
+Use this for the layer with the most instances and an identity-shaped colour.
+The sprite path stays right for anything carrying an arbitrary colour, a
+rotation, or a per-instance size.
+
 ### Strokes (polylines: map outlines, paths, debug)
 
 ```go
@@ -149,6 +173,7 @@ segment into a screen-space quad with miter joins.
 | File              | Purpose                                      |
 |-------------------|----------------------------------------------|
 | `cull.wgsl`       | Compute: frustum/AABB cull + compact         |
+| `subcell.wgsl`    | Compact cell vertex: palette index + ramp    |
 | `instanced.wgsl`  | Sprite/instance vertex: mesh + transform     |
 | `stroke.wgsl`     | Stroke vertex: screen-space expansion        |
 | `map.wgsl`        | Map fill vertex: int32 positions + camera    |
