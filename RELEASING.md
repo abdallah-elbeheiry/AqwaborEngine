@@ -43,11 +43,17 @@ Patch is a fix that changes no API.
 Minor is new API that existing code keeps compiling against.
 Major is a break.
 
-**A major bump changes the module path.** At v2 and above Go requires the path to carry the major as
-a suffix, so `github.com/abdallah-elbeheiry/AqwaborEngine` becomes `.../AqwaborEngine/v2`, and every
-import line in every consumer is rewritten. That is the real cost of a breaking change, and it is
-why v1.0.0 is a promise rather than a milestone: it says the API is now something other people can
-build on.
+**From v2, a major bump changes the module path.** Go requires the path to carry the major as a
+suffix at v2 and above, so `github.com/abdallah-elbeheiry/AqwaborEngine` becomes
+`.../AqwaborEngine/v2`, and every import line in every consumer is rewritten.
+
+**Below v2 it does not.** v0 and v1 share the bare path, and at v0 the API carries no stability
+promise at all: a break is a minor bump, `v0.1.0` to `v0.2.0`, and no import changes. That is the
+whole reason to stay at v0 while the shape of the engine is still moving.
+
+So v1.0.0 is a promise rather than a milestone. It says the API is now something other people can
+build on, and it is the point from which breaking it starts costing every consumer an import
+rewrite. Do not reach for it early.
 
 The `go` directive in `go.mod` is a floor on everyone who imports the engine.
 Raising it breaks anyone on an older toolchain even though no code changed, so it belongs in the
