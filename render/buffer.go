@@ -22,10 +22,12 @@ import (
 // buffer within a single frame is safe (dirty ranges accumulate and Flush
 // handles them all), but a frame that rewrites every instance should not go
 // through N Write calls.
-type InstanceBuffer struct {
+type instanceBufferOf[T any] struct {
 	dev         *wgpu.Device
+	stride      int
+	label       string
 	buffer      *wgpu.Buffer
-	cpuData     []InstanceData
+	cpuData     []T
 	capacity    int
 	dirtyRanges [][2]int // [start, end) in instances
 	count       int      // number of valid instances written this frame
@@ -45,22 +47,39 @@ type retiredBuffer struct {
 // bufferRetireAfter is how many frames a replaced buffer is held before release.
 const bufferRetireAfter = 3
 
-// NewInstanceBuffer creates a new instance buffer with the given capacity.
+// InstanceBuffer holds the 64-byte sprite instances.
+type InstanceBuffer = instanceBufferOf[InstanceData]
+
+// SubcellBuffer holds the 16-byte palette-indexed instances.
+type SubcellBuffer = instanceBufferOf[SubcellInstance]
+
+// NewInstanceBuffer creates a sprite instance buffer.
 // The buffer carries Storage usage so the compute cull pass can read it.
 func NewInstanceBuffer(dev *wgpu.Device, capacity int) *InstanceBuffer {
-	size := uint64(capacity * instanceDataSize)
+	return newInstanceBufferOf[InstanceData](dev, capacity, "instance buffer")
+}
+
+// NewSubcellBuffer creates a compact instance buffer for the palette path.
+func NewSubcellBuffer(dev *wgpu.Device, capacity int) *SubcellBuffer {
+	return newInstanceBufferOf[SubcellInstance](dev, capacity, "subcell buffer")
+}
+
+func newInstanceBufferOf[T any](dev *wgpu.Device, capacity int, label string) *instanceBufferOf[T] {
+	stride := int(unsafe.Sizeof(*new(T)))
 	buf, err := dev.CreateBuffer(&wgpu.BufferDescriptor{
-		Label: "instance buffer",
-		Size:  size,
+		Label: label,
+		Size:  uint64(capacity * stride),
 		Usage: gputypes.BufferUsageVertex | gputypes.BufferUsageCopyDst | gputypes.BufferUsageStorage,
 	})
 	if err != nil {
 		panic(err)
 	}
-	return &InstanceBuffer{
+	return &instanceBufferOf[T]{
 		dev:         dev,
+		stride:      stride,
+		label:       label,
 		buffer:      buf,
-		cpuData:     make([]InstanceData, capacity),
+		cpuData:     make([]T, capacity),
 		capacity:    capacity,
 		dirtyRanges: make([][2]int, 0, 8),
 	}
@@ -72,7 +91,7 @@ func NewInstanceBuffer(dev *wgpu.Device, capacity int) *InstanceBuffer {
 //
 // Growing rather than panicking is the point: a game that spawns one more
 // sprite than the number guessed at startup used to crash.
-func (ib *InstanceBuffer) grow(n int) bool {
+func (ib *instanceBufferOf[T]) grow(n int) bool {
 	if n <= ib.capacity {
 		return true
 	}
@@ -87,8 +106,8 @@ func (ib *InstanceBuffer) grow(n int) bool {
 	}
 
 	buf, err := ib.dev.CreateBuffer(&wgpu.BufferDescriptor{
-		Label: "instance buffer",
-		Size:  uint64(capacity * instanceDataSize),
+		Label: ib.label,
+		Size:  uint64(capacity * ib.stride),
 		Usage: gputypes.BufferUsageVertex | gputypes.BufferUsageCopyDst | gputypes.BufferUsageStorage,
 	})
 	if err != nil {
@@ -101,7 +120,7 @@ func (ib *InstanceBuffer) grow(n int) bool {
 	}
 	ib.buffer = buf
 
-	grown := make([]InstanceData, capacity)
+	grown := make([]T, capacity)
 	copy(grown, ib.cpuData)
 	ib.cpuData = grown
 	ib.capacity = capacity
@@ -119,7 +138,7 @@ func (ib *InstanceBuffer) grow(n int) bool {
 
 // BeginFrame advances the frame counter and releases buffers retired long
 // enough ago that no submitted frame can still be reading them.
-func (ib *InstanceBuffer) BeginFrame() {
+func (ib *instanceBufferOf[T]) BeginFrame() {
 	ib.frame++
 	kept := ib.retired[:0]
 	for _, r := range ib.retired {
@@ -134,7 +153,7 @@ func (ib *InstanceBuffer) BeginFrame() {
 
 // Release frees the GPU buffer and anything still retired. A batch that is not
 // released leaks its buffer for the life of the process.
-func (ib *InstanceBuffer) Release() {
+func (ib *instanceBufferOf[T]) Release() {
 	for _, r := range ib.retired {
 		r.buf.Release()
 	}
@@ -148,7 +167,7 @@ func (ib *InstanceBuffer) Release() {
 // Write marks a single instance slot for upload. Use this for sparse updates
 // where only a few instances change per frame. Does not compare old vs new.
 // For full-buffer rewrites use WriteAll instead.
-func (ib *InstanceBuffer) Write(index int, data *InstanceData) {
+func (ib *instanceBufferOf[T]) Write(index int, data *T) {
 	if index < 0 {
 		log.Error("instance index is negative", "index", index)
 		return
@@ -166,7 +185,7 @@ func (ib *InstanceBuffer) Write(index int, data *InstanceData) {
 // WriteAll copies src into the buffer starting at slot 0, sets the count,
 // and marks [0, len(src)) dirty in one range. Use this for dense frames
 // where every live instance is rewritten.
-func (ib *InstanceBuffer) WriteAll(src []InstanceData) {
+func (ib *instanceBufferOf[T]) WriteAll(src []T) {
 	n := len(src)
 	if n > ib.capacity && !ib.grow(n) {
 		return
@@ -181,7 +200,7 @@ func (ib *InstanceBuffer) WriteAll(src []InstanceData) {
 // WriteAt copies src into the buffer starting at start, sets the count
 // to max(count, start+len(src)), and marks one dirty range.
 // Use this for a batch write that covers a contiguous region.
-func (ib *InstanceBuffer) WriteAt(start int, src []InstanceData) {
+func (ib *instanceBufferOf[T]) WriteAt(start int, src []T) {
 	n := len(src)
 	if n == 0 {
 		return
@@ -205,7 +224,7 @@ func (ib *InstanceBuffer) WriteAt(start int, src []InstanceData) {
 // Must be called once per frame before drawing (DrawInstanced does this
 // automatically). Callers using WriteAll/WriteAt already emit clean ranges;
 // this merge is a safety net for mixed sparse+dense patterns in one frame.
-func (ib *InstanceBuffer) Flush(queue *wgpu.Queue) {
+func (ib *instanceBufferOf[T]) Flush(queue *wgpu.Queue) {
 	if len(ib.dirtyRanges) == 0 {
 		return
 	}
@@ -232,8 +251,8 @@ func (ib *InstanceBuffer) Flush(queue *wgpu.Queue) {
 
 	for _, r := range merged {
 		start, end := r[0], r[1]
-		byteStart := uint64(start * instanceDataSize)
-		byteSize := uint64((end - start) * instanceDataSize)
+		byteStart := uint64(start * ib.stride)
+		byteSize := uint64((end - start) * ib.stride)
 
 		// Upload the dirty range from CPU data
 		src := unsafe.Slice((*byte)(unsafe.Pointer(&ib.cpuData[start])), int(byteSize))
@@ -267,7 +286,7 @@ func mergeRanges(ranges [][2]int) [][2]int {
 }
 
 // Reset clears the instance count and dirty ranges for the next frame.
-func (ib *InstanceBuffer) Reset() {
+func (ib *instanceBufferOf[T]) Reset() {
 	ib.count = 0
 	ib.dirtyRanges = ib.dirtyRanges[:0]
 }
@@ -275,7 +294,7 @@ func (ib *InstanceBuffer) Reset() {
 // SetCount manually sets the instance count without writing data.
 // Useful when the caller has filled CPUData directly (e.g. via InstanceSlice)
 // and then calls WriteAll, or wants to control count independently.
-func (ib *InstanceBuffer) SetCount(n int) {
+func (ib *instanceBufferOf[T]) SetCount(n int) {
 	if n < 0 {
 		log.Error("instance count is negative", "n", n)
 		return
@@ -290,7 +309,7 @@ func (ib *InstanceBuffer) SetCount(n int) {
 // Write into it, then call WriteAll or WriteAt to mark the range dirty.
 // This avoids per-slot Write calls when packing active instances into a
 // contiguous block (see particle.Emitter.WriteInstances).
-func InstanceSlice(ib *InstanceBuffer, n int) []InstanceData {
+func InstanceSlice[T any](ib *instanceBufferOf[T], n int) []T {
 	if n > ib.capacity && !ib.grow(n) {
 		return nil
 	}
@@ -298,21 +317,21 @@ func InstanceSlice(ib *InstanceBuffer, n int) []InstanceData {
 }
 
 // Buffer returns the underlying GPU buffer.
-func (ib *InstanceBuffer) Buffer() *wgpu.Buffer {
+func (ib *instanceBufferOf[T]) Buffer() *wgpu.Buffer {
 	return ib.buffer
 }
 
 // Count returns the number of valid instances written this frame.
-func (ib *InstanceBuffer) Count() int {
+func (ib *instanceBufferOf[T]) Count() int {
 	return ib.count
 }
 
 // Capacity returns the maximum number of instances.
-func (ib *InstanceBuffer) Capacity() int {
+func (ib *instanceBufferOf[T]) Capacity() int {
 	return ib.capacity
 }
 
 // CPUData returns the CPU-side instance data slice (for direct access if needed).
-func (ib *InstanceBuffer) CPUData() []InstanceData {
+func (ib *instanceBufferOf[T]) CPUData() []T {
 	return ib.cpuData
 }

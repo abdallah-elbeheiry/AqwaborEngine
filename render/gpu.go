@@ -129,6 +129,9 @@ func (g *GPU) SetCamera(viewProj [16]float32, viewportW, viewportH float32) {
 	if g.r.mapPipe != nil {
 		g.r.mapPipe.UpdateCamera(g.r.queue, viewProj, viewportW, viewportH)
 	}
+	if g.r.subcellPipe != nil {
+		g.r.subcellPipe.UpdateCamera(g.r.queue, viewProj, viewportW, viewportH)
+	}
 }
 
 // --- Instanced draws ---
@@ -232,6 +235,29 @@ func (g *GPU) unitQuad() *Mesh {
 	}
 	return g.cullMesh
 }
+
+// --- Cells: the compact palette-indexed path ---
+
+// Subcells creates a buffer of compact 16-byte instances for the dense cell
+// layer, where the colour is a palette index rather than an RGBA value.
+func (g *GPU) Subcells(capacity int) *SubcellBuffer {
+	return NewSubcellBuffer(g.r.Device(), capacity)
+}
+
+// SetRamp uploads the palette the compact instances index into. Upload it once;
+// every cell reads it, which is what makes the index cheaper than the colour.
+func (g *GPU) SetRamp(table *RampTable) {
+	g.r.SubcellPipeline().SetRamp(g.r.Queue(), table)
+}
+
+// SetCellSize sets the world-space size every cell is drawn at. A grid shares
+// one size, so it is a uniform rather than bytes on every instance.
+func (g *GPU) SetCellSize(w, h float32) {
+	g.r.SubcellPipeline().SetCellSize(g.r.Queue(), w, h)
+}
+
+// DrawSubcells draws the cell layer.
+func (g *GPU) DrawSubcells(cells *SubcellBuffer) { g.r.DrawSubcells(cells) }
 
 // --- Strokes ---
 

@@ -36,9 +36,10 @@ type Renderer struct {
 	clear      gputypes.Color
 	clearFirst bool
 
-	instPipe   *Pipeline       // instanced draws
-	strokePipe *StrokePipeline // screen-space-width polylines
-	mapPipe    *MapPipeline    // map fill geometry (optional)
+	instPipe    *Pipeline        // instanced draws
+	strokePipe  *StrokePipeline  // screen-space-width polylines
+	mapPipe     *MapPipeline     // map fill geometry (optional)
+	subcellPipe *SubcellPipeline // compact palette-indexed cells (created on demand)
 
 	stats FrameStats
 }
@@ -232,6 +233,40 @@ func (r *Renderer) UpdateCamera(viewProj [16]float32, viewportW, viewportH float
 	r.instPipe.UpdateCamera(r.queue, viewProj, viewportW, viewportH)
 }
 
+// SubcellPipeline returns the compact cell pipeline, building it on first use.
+// It is built on demand because a game that draws no cell layer should not pay
+// for its ramp table.
+func (r *Renderer) SubcellPipeline() *SubcellPipeline {
+	if r.subcellPipe == nil {
+		r.subcellPipe = NewSubcellPipeline(r.dev, r.queue, r.format)
+	}
+	return r.subcellPipe
+}
+
+// DrawSubcells submits the compact instanced draw for the cell layer.
+func (r *Renderer) DrawSubcells(cells *SubcellBuffer) {
+	if cells.Count() == 0 {
+		return
+	}
+	if !r.ensurePass() {
+		return
+	}
+	cells.Flush(r.queue)
+
+	p := r.SubcellPipeline()
+	mesh := p.Mesh()
+	r.pass.SetPipeline(p.Pipeline())
+	r.pass.SetBindGroup(0, p.BindGroup(), nil)
+	r.pass.SetVertexBuffer(0, mesh.VertexBuffer, 0)
+	r.pass.SetVertexBuffer(1, cells.Buffer(), 0)
+	r.pass.SetIndexBuffer(mesh.IndexBuffer, gputypes.IndexFormatUint32, 0)
+	r.pass.DrawIndexed(mesh.IndexCount, uint32(cells.Count()), 0, 0, 0)
+
+	r.stats.DrawCalls++
+	r.stats.Instances += cells.Count()
+	r.stats.Triangles += int(mesh.IndexCount/3) * cells.Count()
+}
+
 // UpdateStrokeCamera updates the camera uniform for stroke draws.
 // The stroke pipeline needs the viewport size for screen-space width
 // calculations, so it maintains a separate camera buffer.
@@ -288,4 +323,8 @@ func (r *Renderer) SetMapPipeline(p *MapPipeline) { r.mapPipe = p }
 func (r *Renderer) Release() {
 	r.instPipe.Release()
 	r.strokePipe.Release()
+	if r.subcellPipe != nil {
+		r.subcellPipe.Release()
+		r.subcellPipe = nil
+	}
 }
