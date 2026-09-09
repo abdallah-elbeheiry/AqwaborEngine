@@ -22,9 +22,19 @@ type Renderer struct {
 	queue  *wgpu.Queue
 	format gputypes.TextureFormat
 
+	// The frame has two phases. Begin captures the encoder and records what the
+	// pass will do; the render pass itself is opened by the first draw. A
+	// compute pass cannot be recorded inside a render pass, so compute work has
+	// to have somewhere to go, and the previous shape gave it nowhere: the
+	// encoder was only reachable once the pass was already open.
 	pass      *wgpu.RenderPassEncoder
 	enc       *wgpu.CommandEncoder // borrowed from gogpu.Context; valid during frame
-	frameOpen bool
+	view      *wgpu.TextureView
+	frameOpen bool // an encoder is captured
+	passOpen  bool // the render pass is recording
+
+	clear      gputypes.Color
+	clearFirst bool
 
 	instPipe   *Pipeline       // instanced draws
 	strokePipe *StrokePipeline // screen-space-width polylines
@@ -63,39 +73,21 @@ func NewRenderer(dp DeviceProvider) *Renderer {
 
 // --- Instanced draws ---
 
-// ClearAndBeginFrame begins a render pass that clears the screen.
+// ClearAndBeginFrame captures the frame's command encoder and records that the
+// render pass will clear to the given colour. It does not open the pass: the
+// first draw does that, which leaves room between here and there for compute
+// work to be encoded.
 func (r *Renderer) ClearAndBeginFrame(dc *gogpu.Context, cr, cg, cb, ca float32) error {
-	enc := dc.CommandEncoder()
-	if enc == nil {
-		return nil
-	}
-	view := dc.SurfaceView()
-	if view == nil {
-		return nil
-	}
-
-	r.stats = FrameStats{}
-	r.enc = enc
-
-	pass, err := enc.BeginRenderPass(&wgpu.RenderPassDescriptor{
-		ColorAttachments: []wgpu.RenderPassColorAttachment{{
-			View:       view,
-			LoadOp:     gputypes.LoadOpClear,
-			StoreOp:    gputypes.StoreOpStore,
-			ClearValue: gputypes.Color{R: float64(cr), G: float64(cg), B: float64(cb), A: float64(ca)},
-		}},
-	})
-	if err != nil {
-		return err
-	}
-
-	r.pass = pass
-	r.frameOpen = true
-	return nil
+	return r.beginFrame(dc, true, gputypes.Color{R: float64(cr), G: float64(cg), B: float64(cb), A: float64(ca)})
 }
 
-// BeginFrame opens a render pass that loads existing content.
+// BeginFrame captures the encoder for a frame that loads existing content
+// rather than clearing.
 func (r *Renderer) BeginFrame(dc *gogpu.Context) error {
+	return r.beginFrame(dc, false, gputypes.Color{})
+}
+
+func (r *Renderer) beginFrame(dc *gogpu.Context, clear bool, c gputypes.Color) error {
 	enc := dc.CommandEncoder()
 	if enc == nil {
 		return nil
@@ -107,31 +99,61 @@ func (r *Renderer) BeginFrame(dc *gogpu.Context) error {
 
 	r.stats = FrameStats{}
 	r.enc = enc
-
-	pass, err := enc.BeginRenderPass(&wgpu.RenderPassDescriptor{
-		ColorAttachments: []wgpu.RenderPassColorAttachment{{
-			View:    view,
-			LoadOp:  gputypes.LoadOpLoad,
-			StoreOp: gputypes.StoreOpStore,
-		}},
-	})
-	if err != nil {
-		return err
-	}
-
-	r.pass = pass
+	r.view = view
+	r.clear = c
+	r.clearFirst = clear
 	r.frameOpen = true
+	r.passOpen = false
 	return nil
 }
 
-// EndFrame closes the render pass.
+// ensurePass opens the render pass if it is not already recording. Every draw
+// goes through it, so the pass opens on first use and a frame that draws
+// nothing never opens one.
+func (r *Renderer) ensurePass() bool {
+	if r.passOpen {
+		return true
+	}
+	if !r.frameOpen || r.enc == nil || r.view == nil {
+		return false
+	}
+
+	loadOp := gputypes.LoadOpLoad
+	if r.clearFirst {
+		loadOp = gputypes.LoadOpClear
+	}
+	pass, err := r.enc.BeginRenderPass(&wgpu.RenderPassDescriptor{
+		ColorAttachments: []wgpu.RenderPassColorAttachment{{
+			View:       r.view,
+			LoadOp:     loadOp,
+			StoreOp:    gputypes.StoreOpStore,
+			ClearValue: r.clear,
+		}},
+	})
+	if err != nil {
+		log.Error("failed to open the render pass", "err", err)
+		return false
+	}
+	r.pass = pass
+	r.passOpen = true
+	return true
+}
+
+// PassOpen reports whether the render pass is already recording, which is what
+// makes it too late to encode compute work for this frame.
+func (r *Renderer) PassOpen() bool { return r.passOpen }
+
+// EndFrame closes the render pass if one was opened, and drops the borrowed
+// encoder. A frame that drew nothing opened no pass and has nothing to close.
 func (r *Renderer) EndFrame() {
 	if r.pass != nil {
 		r.pass.End()
 		r.pass = nil
 	}
 	r.enc = nil
+	r.view = nil
 	r.frameOpen = false
+	r.passOpen = false
 }
 
 // --- Instanced draws ---
@@ -141,10 +163,10 @@ func (r *Renderer) EndFrame() {
 // Flush call (an explicit Flush beforehand is still fine and not duplicated:
 // Flush is a no-op when no dirty ranges remain).
 func (r *Renderer) DrawInstanced(mesh *Mesh, instances *InstanceBuffer) {
-	if r.pass == nil || !r.frameOpen {
+	if instances.Count() == 0 {
 		return
 	}
-	if instances.Count() == 0 {
+	if !r.ensurePass() {
 		return
 	}
 	instances.Flush(r.queue)
@@ -167,7 +189,7 @@ func (r *Renderer) DrawInstanced(mesh *Mesh, instances *InstanceBuffer) {
 // vertex input and indirectBuf supplies the GPU-written instance count.
 // Encode the cull dispatch before the render pass that calls this.
 func (r *Renderer) DrawInstancedIndirect(mesh *Mesh, cull *CullPipeline) {
-	if r.pass == nil || !r.frameOpen {
+	if !r.ensurePass() {
 		return
 	}
 	r.pass.SetPipeline(r.instPipe.Pipeline())
@@ -184,7 +206,10 @@ func (r *Renderer) DrawInstancedIndirect(mesh *Mesh, cull *CullPipeline) {
 // DrawMapMesh draws pre-built map geometry with the map pipeline.
 // Must be called inside an active render pass.
 func (r *Renderer) DrawMapMesh(mesh *MapMesh, pipe *MapPipeline) {
-	if r.pass == nil || !r.frameOpen || mesh == nil || mesh.Buffer == nil || mesh.Total == 0 {
+	if mesh == nil || mesh.Buffer == nil || mesh.Total == 0 {
+		return
+	}
+	if !r.ensurePass() {
 		return
 	}
 	r.pass.SetPipeline(pipe.Pipeline())
@@ -220,10 +245,10 @@ func (r *Renderer) UpdateStrokeCamera(viewProj [16]float32, viewportW, viewportH
 // Each segment is expanded into a screen-space quad by the vertex shader.
 // Flushes pending dirty ranges automatically.
 func (r *Renderer) DrawStrokes(segments *StrokeBuffer) {
-	if r.pass == nil || !r.frameOpen {
+	if segments.Count() == 0 {
 		return
 	}
-	if segments.Count() == 0 {
+	if !r.ensurePass() {
 		return
 	}
 	segments.Flush(r.queue)

@@ -13,15 +13,26 @@ gfx := render.New(dp)  // dp = win.DeviceProvider()
 
 ### Frame lifecycle
 
+A frame has two phases. `Begin` captures the frame's command encoder and records
+what the render pass will do; the first draw opens the pass. Compute work goes
+between them, because a compute pass cannot be recorded inside a render pass.
+
 ```go
 gfx.Begin(dc, render.Clear{R: 0.05, G: 0.05, B: 0.1, A: 1})
 gfx.SetCamera(viewProj, viewportW, viewportH)
-// ... draw calls ...
+
+culled := gfx.CullSprites(batch, bounds)  // compute phase
+gfx.DrawSpritesCulled(culled)             // opens the render pass
+gfx.DrawStrokes(strokes)
+
 gfx.End()
 ```
 
 `SetCamera` writes a single shared camera uniform used by sprite, stroke,
-and map pipelines.
+and map pipelines. `BeginLoad` replaces `Begin` for a frame that keeps what is
+already on the surface.
+
+A frame that draws nothing opens no render pass.
 
 ### Sprites / instances (primary path)
 
@@ -43,11 +54,13 @@ gfx.DrawSprites(batch)
 ### GPU compute culling + indirect draw
 
 ```go
-// Draw only instances visible within viewBounds.
-gfx.DrawSpritesCulled(batch, render.ViewBounds{
+// Encode the cull while only the encoder is open.
+culled := gfx.CullSprites(batch, render.ViewBounds{
     MinX: -640, MinY: -360,
     MaxX:  640, MaxY:  360,
 })
+// The draw that consumes it opens the render pass.
+gfx.DrawSpritesCulled(culled)
 ```
 
 The cull pass runs as a compute shader on the GPU:
@@ -57,6 +70,20 @@ The cull pass runs as a compute shader on the GPU:
 4. Draws with `DrawIndexedIndirect` using the GPU-written instance count.
 
 When instances are off-screen, fewer are drawn than submitted.
+
+**Ordering.** `CullSprites` has to be called after `Begin` and before the first
+draw. Calling it once the render pass is open is refused and logged, rather than
+being dropped silently the way it used to be: the encoder was only reachable
+after the pass had opened, so the dispatch never ran, the indirect count stayed
+at the zero the reset wrote, and the draw drew nothing.
+
+**One cull a frame.** The output and indirect buffers are single, so a second
+cull would overwrite the first. A second call in one frame is refused and
+logged.
+
+Growing the batch past the cull pipeline's capacity builds a larger pipeline and
+retires the old one for three frames before releasing it, because a submitted
+frame may still be reading its buffers.
 
 ### Strokes (polylines: map outlines, paths, debug)
 

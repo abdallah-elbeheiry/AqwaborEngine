@@ -115,8 +115,11 @@ func ExtractSprites(c Components, batch *SpriteBatch) {
 	})
 }
 
-// DrawWorld performs a full frame: camera, begin, draw, end. With a positive
-// cullThreshold and a batch at or above it, the GPU cull pass is used.
+// DrawWorld performs a full frame: camera, begin, cull, draw, end. With a
+// positive cullThreshold and a batch at or above it, the GPU cull pass runs.
+//
+// The order here is the frame's two phases: the cull is encoded while only the
+// command encoder is open, and the draw that consumes it opens the render pass.
 func DrawWorld(
 	gfx *GPU,
 	batch *SpriteBatch,
@@ -127,12 +130,13 @@ func DrawWorld(
 	bounds ViewBounds,
 	cullThreshold int,
 ) {
-	gfx.SetCamera(viewProj, viewW, viewH)
 	if err := gfx.Begin(dc, clear); err != nil {
 		return
 	}
+	gfx.SetCamera(viewProj, viewW, viewH)
 	if cullThreshold > 0 && batch.Count() >= cullThreshold {
-		gfx.DrawSpritesCulled(batch, bounds)
+		culled := gfx.CullSprites(batch, bounds)
+		gfx.DrawSpritesCulled(culled)
 	} else {
 		gfx.DrawSprites(batch)
 	}
