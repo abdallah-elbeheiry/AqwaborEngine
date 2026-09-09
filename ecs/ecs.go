@@ -36,6 +36,7 @@ type World struct {
 	registry *componentRegistry
 	stores   []store
 	cmdBuf   *commandBuffer
+	timers   *Timers
 
 	systems *systemManager
 }
@@ -49,6 +50,7 @@ func NewWorld(opts ...WorldOption) *World {
 	w.entities = newEntityAllocator()
 	w.registry = newComponentRegistry()
 	w.cmdBuf = newCommandBuffer()
+	w.timers = newTimers()
 	w.systems = newSystemManager()
 	w.log.Info("world created")
 	return w
@@ -63,8 +65,8 @@ func (w *World) Create() Entity {
 	return e
 }
 
-// Destroy retires an entity and removes it from every component store. A stale
-// handle destroys nothing.
+// Destroy retires an entity, removes it from every component store and cancels
+// any timer it was waiting on. A stale handle destroys nothing.
 func (w *World) Destroy(e Entity) bool {
 	if !w.entities.alive(e) {
 		return false
@@ -72,6 +74,7 @@ func (w *World) Destroy(e Entity) bool {
 	for _, s := range w.stores {
 		s.removeEntity(e)
 	}
+	w.timers.Cancel(e)
 	w.entities.destroy(e)
 	if w.log.Enabled(logx.TraceLevel) {
 		w.log.Trace("entity destroyed", "entity", e)
@@ -98,7 +101,21 @@ func (w *World) Reset() {
 	}
 	w.entities = newEntityAllocator()
 	w.cmdBuf.clear()
+	w.timers.reset()
 }
+
+// --- Time ---
+
+// Timers is the wheel entities schedule future wakeups on.
+func (w *World) Timers() *Timers { return w.timers }
+
+// Tick is the simulation tick the world has reached.
+func (w *World) Tick() uint64 { return w.timers.Now() }
+
+// Advance moves the world on one tick and calls fn for every entity whose timer
+// is due. A system driving the world calls this once a step; what fn does is
+// usually to wake the entity in whichever store the system iterates.
+func (w *World) Advance(fn func(e Entity)) { w.timers.Advance(fn) }
 
 // --- Systems ---
 
