@@ -122,7 +122,7 @@ func (g *GPU) End() {
 // --- Camera ---
 
 // SetCamera updates the camera view-projection for all registered pipelines
-// (sprite, stroke, and map if set via Renderer.SetMapPipeline).
+// (sprite, stroke, and fill if set via Renderer.SetFillPipeline).
 func (g *GPU) SetCamera(viewProj [16]float32, viewportW, viewportH float32) {
 	g.r.UpdateCamera(viewProj, viewportW, viewportH)
 	g.r.UpdateStrokeCamera(viewProj, viewportW, viewportH)
@@ -286,8 +286,7 @@ func (g *GPU) SurfaceFormat() gputypes.TextureFormat { return g.r.SurfaceFormat(
 // Stats returns per-frame rendering metrics.
 func (g *GPU) Stats() FrameStats { return g.r.Stats() }
 
-// Renderer returns the underlying Renderer for cases that need direct access
-// (e.g. maprender which builds its own pipelines).
+// Renderer returns the underlying Renderer for cases that need direct access.
 func (g *GPU) Renderer() *Renderer { return g.r }
 
 // Release releases all GPU resources.

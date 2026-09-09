@@ -7,11 +7,10 @@ import (
 
 	"github.com/abdallah-elbeheiry/AqwaborEngine/camera"
 	"github.com/abdallah-elbeheiry/AqwaborEngine/ecs"
+	"github.com/abdallah-elbeheiry/AqwaborEngine/examples/mapdata"
 	"github.com/abdallah-elbeheiry/AqwaborEngine/input"
 	gogpuinput "github.com/abdallah-elbeheiry/AqwaborEngine/input/backend/gogpu"
 	"github.com/abdallah-elbeheiry/AqwaborEngine/logx"
-	"github.com/abdallah-elbeheiry/AqwaborEngine/mapdata"
-	"github.com/abdallah-elbeheiry/AqwaborEngine/maprender"
 	"github.com/abdallah-elbeheiry/AqwaborEngine/render"
 	"github.com/abdallah-elbeheiry/AqwaborEngine/schedulers"
 	"github.com/abdallah-elbeheiry/AqwaborEngine/sound"
@@ -23,10 +22,8 @@ import (
 )
 
 func main() {
-	logx.Init(logx.WithColor(true), logx.WithTimestamp(true), logx.WithLevel(logx.TraceLevel))
+	logx.Init(logx.WithColor(true), logx.WithTimestamp(true), logx.WithLevel(logx.DebugLevel))
 
-	// Open the audio context once and keep it alive for the whole program so the
-	// song keeps playing while the demo runs.
 	snd, err := sound.New(sound.WithVolume(0.5))
 	if err != nil {
 		logx.Errorf("sound init (no audio device?): %v", err)
@@ -72,9 +69,6 @@ func runUIDemo() {
 	s.Start()
 	defer s.Stop()
 
-	// Load the project's bundled fox.png through the app's image manager. Assets
-	// are loaded explicitly (no hidden I/O in widgets) and one asset can be
-	// reused by many widgets.
 	var fox *ui.ImageAsset
 	if foxAsset, err := app.Images().Load("examples/fox.png"); err != nil {
 		logx.Warnf("image load (examples/fox.png): %v", err)
@@ -87,8 +81,6 @@ func runUIDemo() {
 	}
 	idx := 0
 
-	// build rebuilds the root so captured colors (surface, button) follow the
-	// active theme when we switch it at runtime.
 	var build func()
 	build = func() {
 		children := []ui.Widget{
@@ -101,7 +93,6 @@ func runUIDemo() {
 				build()
 			}),
 		}
-		// A single image button under Cycle Theme. Clickable via ImageButton.
 		if fox != nil {
 			children = append(children,
 				ui.ImageButton(fox, func() { logx.Info("fox image clicked") }),
@@ -116,8 +107,6 @@ func runUIDemo() {
 		logx.Fatalf("ui run: %v", err)
 	}
 
-	// After Run returns the widgets are gone, so releasing the asset now
-	// succeeds. ForceRelease is intentionally not used here.
 	if fox != nil {
 		if ok := app.Images().TryRelease(fox); !ok {
 			logx.Warn("fox asset still in use at shutdown")
@@ -152,11 +141,8 @@ func runWorldDemo() {
 	w := ecs.NewWorld()
 	camComp := camera.MustRegisterECS(w)
 	render.MustRegisterECS(w)
-	scenes := maprender.MustRegisterECS(w)
-	sceneComp := scenes.Component()
 
-	// Camera entity — source of truth for all view state.
-	// Matches old behaviour: Fit centres, then position reset to origin.
+	// Camera entity.
 	vp := geometry.Sz(1280, 720)
 	camE := w.Create()
 	camComp.Set(camE, camera.Camera{
@@ -169,22 +155,6 @@ func runWorldDemo() {
 	c.Fit(360, 180, vp.Width, vp.Height)
 	c.X = 0
 	c.Y = 0
-
-	// Map scene entity — clear colour + world scale.
-	mapE := w.Create()
-	sceneComp.Set(mapE, maprender.MapScene{
-		ClearR:     world.Background.R,
-		ClearG:     world.Background.G,
-		ClearB:     world.Background.B,
-		ClearA:     world.Background.A,
-		WorldScale: float32(world.Scale),
-		Active:     1,
-	})
-	sceneComp.Wake(mapE)
-
-	// Renderer — CPU fill triangulation in NewRenderer, GPU mesh built later.
-	rend := maprender.NewRenderer(world, 1, nil)
-	scenes.Bind(mapE, rend)
 
 	// --- Input ---
 	app := win.App()
@@ -247,6 +217,8 @@ func runWorldDemo() {
 
 	logx.Info("world demo running: drag to pan, scroll to zoom, R=reset, =/- zoom")
 	var gfx *render.GPU
+	var rs *render.RenderSystem
+	var sceneE ecs.Entity
 	if err := win.Run(func(dc *gogpu.Context) {
 		now := time.Now()
 		dt := now.Sub(lastFrame).Seconds()
@@ -256,10 +228,8 @@ func runWorldDemo() {
 
 		if gfx == nil {
 			gfx = render.New(win.DeviceProvider())
-			if c, ok := camComp.Get(camE); ok {
-				rend.SetRefZoom(c.Zoom)
-			}
-			rend.SetRenderer(gfx.Renderer())
+			rs = render.MustRegisterRenderSystem(w, gfx.Renderer())
+			sceneE = rs.LoadMapScene(w, world)
 		}
 
 		// Drain accumulated scroll-wheel zoom toward cursor.
@@ -279,16 +249,14 @@ func runWorldDemo() {
 			}
 		}
 
-		// Read components → build view-projection → draw.
+		// Read camera → build view-projection → draw.
 		cam, _ := camComp.Get(camE)
-		scene, _ := sceneComp.Get(mapE)
+		scene, _ := rs.SceneComponent().Get(sceneE)
 
-		rend.SetViewport(vp)
-		rend.SetZoom(cam.Zoom)
 		vpMat := render.ViewProjMap(*cam, float32(vp.Width), float32(vp.Height), scene.WorldScale)
 		gfx.SetCamera(vpMat, float32(vp.Width), float32(vp.Height))
 		gfx.Begin(dc, render.Clear{R: scene.ClearR, G: scene.ClearG, B: scene.ClearB, A: scene.ClearA})
-		scenes.Draw(mapE)
+		rs.Draw(sceneE, *cam, float32(vp.Width), float32(vp.Height))
 		gfx.End()
 	}); err != nil {
 		logx.Fatalf("window run failed: %v", err)
