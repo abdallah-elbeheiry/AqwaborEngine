@@ -82,16 +82,13 @@ func MustRegisterECS(w *ecs.World) Components {
 // Sprite, taking Color where present and white where not.
 //
 // It walks the Transform store's dense array, so the cost is one pass over
-// contiguous memory plus a lookup per entity into the two other stores. It
-// stops at the batch's capacity rather than writing past it.
+// contiguous memory plus a lookup per entity into the two other stores. Writing
+// past the batch's capacity grows it rather than panicking, so a scene larger
+// than the number guessed at startup costs one reallocation.
 func ExtractSprites(c Components, batch *SpriteBatch) {
 	batch.Reset()
-	capacity := batch.Capacity()
 	i := 0
 	ecs.Each2(c.Transform, c.Sprite, func(e ecs.Entity, t *Transform, s *Sprite) {
-		if i >= capacity {
-			return
-		}
 		inst := InstanceData{
 			Position: [2]float32{t.X, t.Y},
 			Rotation: t.Rot,

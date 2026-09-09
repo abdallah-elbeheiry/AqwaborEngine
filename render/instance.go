@@ -27,9 +27,15 @@ type InstanceData struct {
 
 const instanceDataSize = 64 // bytes, must match sizeof(InstanceData) and WGSL stride
 
-// Compile-time guard: array of negative length fails to build if stride drifts.
-var _ [instanceDataSize - 64]byte
-var _ [64 - instanceDataSize]byte
+// Compile-time guard. The old form compared the constant against 64, which a
+// struct that drifted alongside a stale constant passed; this compares the
+// constant against the struct the GPU actually reads.
+var _ [instanceDataSize - unsafe.Sizeof(InstanceData{})]byte
+var _ [unsafe.Sizeof(InstanceData{}) - instanceDataSize]byte
+
+// unsafeSizeofInstanceData exposes the size for a test that says what drifted
+// rather than only failing to compile.
+func unsafeSizeofInstanceData() uintptr { return unsafe.Sizeof(InstanceData{}) }
 
 func init() {
 	if unsafe.Sizeof(InstanceData{}) != instanceDataSize {
