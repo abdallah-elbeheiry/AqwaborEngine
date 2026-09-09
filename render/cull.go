@@ -55,6 +55,11 @@ type CullPipeline struct {
 	cachedBG     *wgpu.BindGroup
 	cachedInput  *wgpu.Buffer
 	cachedCamera *wgpu.Buffer
+
+	// used marks that this frame has already spent its one cull. The output and
+	// indirect buffers are single: a second cull in a frame would overwrite the
+	// first, which used to happen silently.
+	used bool
 }
 
 // NewCullPipeline creates the compute cull pipeline and GPU buffers.
@@ -139,6 +144,22 @@ func NewCullPipeline(dev *wgpu.Device, queue *wgpu.Queue, maxInstances int) *Cul
 	}
 
 	return cp
+}
+
+// BeginFrame makes the pipeline's single cull available again. Call once a
+// frame, before any cull.
+func (cp *CullPipeline) BeginFrame() { cp.used = false }
+
+// Claim reserves this frame's cull, reporting false if it is already spent.
+// One culled draw a frame is the current limit: the output and indirect buffers
+// are single, and giving each cull its own region needs dynamic bind group
+// offsets and a base index in the shader.
+func (cp *CullPipeline) Claim() bool {
+	if cp.used {
+		return false
+	}
+	cp.used = true
+	return true
 }
 
 // ResetIndirect clears the instance count in the indirect command buffer.
