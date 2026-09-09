@@ -151,6 +151,7 @@ func (g *GPU) DrawSprites(batch *SpriteBatch) {
 // drawn. The zero value draws nothing.
 type Culled struct {
 	mesh *Mesh
+	slot int
 	ok   bool
 }
 
@@ -163,8 +164,9 @@ type Culled struct {
 // pass is open is refused rather than silently dropped, which is what used to
 // happen.
 //
-// One cull a frame: the output and indirect buffers are single, so a second
-// would overwrite the first.
+// Several culls a frame are allowed, up to the pipeline's slot count. Each
+// takes its own region of the output buffer and its own draw command, so they
+// do not overwrite one another.
 func (g *GPU) CullSprites(batch *SpriteBatch, viewBounds ViewBounds) Culled {
 	instances := batch.bufferInternal()
 	if instances.Count() == 0 {
@@ -181,8 +183,10 @@ func (g *GPU) CullSprites(batch *SpriteBatch, viewBounds ViewBounds) Culled {
 	}
 
 	g.ensureCull(instances.Count())
-	if !g.cull.Claim() {
-		log.Error("CullSprites called twice in one frame; only one culled draw is supported")
+	slot, ok := g.cull.Claim()
+	if !ok {
+		log.Error("this frame is out of cull slots; each culled draw needs one",
+			"slots", cullSlots)
 		return Culled{}
 	}
 
@@ -191,16 +195,17 @@ func (g *GPU) CullSprites(batch *SpriteBatch, viewBounds ViewBounds) Culled {
 		mesh = g.unitQuad()
 	}
 
-	g.cull.ResetIndirect(mesh.IndexCount)
+	g.cull.ResetIndirect(slot, mesh.IndexCount)
 	g.cull.EncodeDispatch(
 		enc,
+		slot,
 		instances.Buffer(),
 		g.r.CameraBuffer(),
 		instances.Count(),
 		[2]float32{viewBounds.MinX, viewBounds.MinY},
 		[2]float32{viewBounds.MaxX, viewBounds.MaxY},
 	)
-	return Culled{mesh: mesh, ok: true}
+	return Culled{mesh: mesh, slot: slot, ok: true}
 }
 
 // DrawSpritesCulled draws the survivors of a cull encoded earlier this frame.
@@ -209,7 +214,7 @@ func (g *GPU) DrawSpritesCulled(c Culled) {
 	if !c.ok {
 		return
 	}
-	g.r.DrawInstancedIndirect(c.mesh, g.cull)
+	g.r.DrawInstancedIndirect(c.mesh, g.cull, c.slot)
 }
 
 // ensureCull creates or grows the cull pipeline. A pipeline replaced by a

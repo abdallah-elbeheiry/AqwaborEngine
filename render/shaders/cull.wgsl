@@ -20,7 +20,10 @@ struct Camera {
 
 struct CullParams {
     instanceCount: u32,
-    _pad:          u32,
+    // outputBase is the first index of this cull's region in the output buffer.
+    // Several culls share one buffer, each compacting from its own base, so a
+    // second cull in a frame no longer overwrites the first.
+    outputBase:    u32,
     minBounds:     vec2<f32>,
     maxBounds:     vec2<f32>,
 };
@@ -127,7 +130,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
 
-    // Compact: atomically claim an output slot and write
+    // Compact: atomically claim a place in this cull's region and write there.
     let idx = atomicAdd(&indirectCmd.instanceCount, 1u);
-    outputInstances[idx] = inst;
+    outputInstances[cullParams.outputBase + idx] = inst;
 }

@@ -185,20 +185,21 @@ func (r *Renderer) DrawInstanced(mesh *Mesh, instances *InstanceBuffer) {
 }
 
 // DrawInstancedIndirect submits an indirect instanced draw over culled data.
-// The cull compute pass compacts survivors into cull.OutputBuffer() starting
-// at slot 0 (FirstInstance = 0), so that buffer is bound as the instance
-// vertex input and indirectBuf supplies the GPU-written instance count.
-// Encode the cull dispatch before the render pass that calls this.
-func (r *Renderer) DrawInstancedIndirect(mesh *Mesh, cull *CullPipeline) {
+// The cull compute pass compacted survivors into this slot's region of the
+// output buffer, which is bound as the instance stream, and wrote the draw
+// count into this slot's indirect command.
+func (r *Renderer) DrawInstancedIndirect(mesh *Mesh, cull *CullPipeline, slot int) {
 	if !r.ensurePass() {
 		return
 	}
 	r.pass.SetPipeline(r.instPipe.Pipeline())
 	r.pass.SetBindGroup(0, r.instPipe.BindGroup(), nil)
 	r.pass.SetVertexBuffer(0, mesh.VertexBuffer, 0)
-	r.pass.SetVertexBuffer(1, cull.OutputBuffer(), 0)
+	// The instance stream is bound at this slot's region, so the draw command
+	// needs no FirstInstance and the slots stay independent.
+	r.pass.SetVertexBuffer(1, cull.OutputBuffer(), cull.OutputOffset(slot))
 	r.pass.SetIndexBuffer(mesh.IndexBuffer, gputypes.IndexFormatUint32, 0)
-	r.pass.DrawIndexedIndirect(cull.IndirectBuffer(), 0)
+	r.pass.DrawIndexedIndirect(cull.IndirectBuffer(), cull.IndirectOffset(slot))
 	r.stats.DrawCalls++
 }
 
