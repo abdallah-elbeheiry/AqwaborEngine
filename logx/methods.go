@@ -221,3 +221,24 @@ func setField(e *zerolog.Event, key string, v any) {
 		e.Interface(key, val)
 	}
 }
+
+// Enabled reports whether an event at this level would be written.
+//
+// Every logging call builds a []any of its key/value pairs and boxes each
+// value into an interface before the level is ever consulted, so a call on a
+// hot path costs allocations even when its output is discarded. Guarding such
+// a call with Enabled skips that construction:
+//
+//	if log.Enabled(logx.TraceLevel) {
+//	    log.Trace("component attached", "entity", e, "component_id", id)
+//	}
+//
+// Only worth doing where the call runs per entity or per frame; elsewhere the
+// guard costs more reading than it saves.
+func (l *Logger) Enabled(level zerolog.Level) bool {
+	return level >= current().GetLevel()
+}
+
+// Enabled reports whether an event at this level would be written by the
+// package-level logger. See Logger.Enabled.
+func Enabled(level zerolog.Level) bool { return stdLogger().Enabled(level) }

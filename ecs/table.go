@@ -65,7 +65,9 @@ func (t *table) remove(row int, l *logx.Logger) (removed Entity, swapped Entity)
 	t.entities = t.entities[:last]
 	t.count--
 
-	l.Debug("entity removed from table", "entity", removed, "archetype", t.key, "row", row)
+	if l.Enabled(logx.TraceLevel) {
+		l.Trace("entity removed from table", "entity", removed, "archetype", t.key, "row", row)
+	}
 	return removed, swapped
 }
 
