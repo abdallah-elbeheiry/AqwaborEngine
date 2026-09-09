@@ -37,6 +37,7 @@ type World struct {
 	stores   []store
 	cmdBuf   *commandBuffer
 	timers   *Timers
+	sets     []*Set
 
 	systems *systemManager
 }
@@ -74,6 +75,9 @@ func (w *World) Destroy(e Entity) bool {
 	for _, s := range w.stores {
 		s.removeEntity(e)
 	}
+	for _, set := range w.sets {
+		set.Remove(e)
+	}
 	w.timers.Cancel(e)
 	w.entities.destroy(e)
 	if w.log.Enabled(logx.TraceLevel) {
@@ -98,6 +102,9 @@ func (w *World) ComponentCount() int { return len(w.stores) }
 func (w *World) Reset() {
 	for _, s := range w.stores {
 		s.reset()
+	}
+	for _, set := range w.sets {
+		set.Clear()
 	}
 	w.entities = newEntityAllocator()
 	w.cmdBuf.clear()
