@@ -17,7 +17,6 @@ type Transform struct {
 }
 
 // Color is an RGBA colour component. Values are typically in [0, 1].
-// Attach a single shared Handle to many entities to batch by colour.
 type Color struct {
 	R, G, B, A float32
 }
@@ -37,70 +36,87 @@ type ClearColor struct {
 
 // --- Registration ---
 
-// RegisterECS registers the render component types with the given world.
-// Call once during startup before spawning any renderable entities.
-func RegisterECS(w *ecs.World) error {
-	if err := ecs.Register[Transform](w); err != nil {
-		return err
-	}
-	if err := ecs.Register[Color](w); err != nil {
-		return err
-	}
-	if err := ecs.Register[Sprite](w); err != nil {
-		return err
-	}
-	if err := ecs.Register[ClearColor](w); err != nil {
-		return err
-	}
-	return nil
+// Components holds the handles for the render component types. Registration
+// returns it and a caller keeps it, because a handle is the only way to reach a
+// component value and it is what makes access an array index rather than a
+// lookup.
+type Components struct {
+	Transform  ecs.Comp[Transform]
+	Color      ecs.Comp[Color]
+	Sprite     ecs.Comp[Sprite]
+	ClearColor ecs.Comp[ClearColor]
 }
 
-// MustRegisterECS is like RegisterECS but panics on error.
-func MustRegisterECS(w *ecs.World) {
-	if err := RegisterECS(w); err != nil {
+// RegisterECS registers the render component types with the world. Call once
+// during startup, before spawning anything renderable.
+func RegisterECS(w *ecs.World) (Components, error) {
+	var c Components
+	var err error
+	if c.Transform, err = ecs.Register[Transform](w); err != nil {
+		return c, err
+	}
+	if c.Color, err = ecs.Register[Color](w); err != nil {
+		return c, err
+	}
+	if c.Sprite, err = ecs.Register[Sprite](w); err != nil {
+		return c, err
+	}
+	if c.ClearColor, err = ecs.Register[ClearColor](w); err != nil {
+		return c, err
+	}
+	return c, nil
+}
+
+// MustRegisterECS is RegisterECS, panicking on error.
+func MustRegisterECS(w *ecs.World) Components {
+	c, err := RegisterECS(w)
+	if err != nil {
 		panic("render.RegisterECS: " + err.Error())
 	}
+	return c
 }
 
 // --- Extract / Draw helpers ---
 
-// ExtractSprites fills batch from all entities that have Transform + Sprite
-// (+ optional Color). Call once per frame before DrawWorld.
-func ExtractSprites(w *ecs.World, batch *SpriteBatch) {
+// ExtractSprites fills batch from every awake entity holding Transform and
+// Sprite, taking Color where present and white where not.
+//
+// It walks the Transform store's dense array, so the cost is one pass over
+// contiguous memory plus a lookup per entity into the two other stores. It
+// stops at the batch's capacity rather than writing past it.
+func ExtractSprites(c Components, batch *SpriteBatch) {
 	batch.Reset()
+	capacity := batch.Capacity()
 	i := 0
-	g := ecs.NewGroup(w, Transform{}, Sprite{})
-	g.ForEach(func(e ecs.Entity) {
-		t, _ := ecs.Get[Transform](w, e)
-		s, _ := ecs.Get[Sprite](w, e)
+	ecs.Each2(c.Transform, c.Sprite, func(e ecs.Entity, t *Transform, s *Sprite) {
+		if i >= capacity {
+			return
+		}
 		inst := InstanceData{
 			Position: [2]float32{t.X, t.Y},
 			Rotation: t.Rot,
 			Layer:    s.Layer,
 			UVOffset: [2]float32{s.UVX, s.UVY},
+			Color:    [4]float32{1, 1, 1, 1},
 		}
-		if c, ok := ecs.Get[Color](w, e); ok {
-			inst.Color = [4]float32{c.R, c.G, c.B, c.A}
-		} else {
-			inst.Color = [4]float32{1, 1, 1, 1}
+		if col, ok := c.Color.Get(e); ok {
+			inst.Color = [4]float32{col.R, col.G, col.B, col.A}
 		}
-		scaleX := t.SX
-		scaleY := t.SY
-		if scaleX == 0 {
-			scaleX = 1
+		sx, sy := t.SX, t.SY
+		if sx == 0 {
+			sx = 1
 		}
-		if scaleY == 0 {
-			scaleY = 1
+		if sy == 0 {
+			sy = 1
 		}
-		inst.Scale = [2]float32{scaleX, scaleY}
+		inst.Scale = [2]float32{sx, sy}
 		batch.Set(i, inst)
 		i++
 	})
 }
 
-// DrawWorld performs a full frame: Begin → SetCamera → draw sprites → End.
-// If cullThreshold > 0 and the batch is at or above that count, GPU culling
-// is used instead of a plain draw.
+// DrawWorld performs a full frame: camera, begin, draw, end. With a positive
+// cullThreshold and a batch at or above it, the GPU cull pass is used.
 func DrawWorld(
 	gfx *GPU,
 	batch *SpriteBatch,
@@ -123,13 +139,14 @@ func DrawWorld(
 	gfx.End()
 }
 
-// SpawnSprite creates an entity with Transform + Color + Sprite components
-// and returns the new entity handle.
-func SpawnSprite(w *ecs.World, t Transform, c Color, s Sprite) ecs.Entity {
+// SpawnSprite creates an entity carrying Transform, Color and Sprite, awake in
+// the Transform store so ExtractSprites sees it.
+func SpawnSprite(w *ecs.World, c Components, t Transform, col Color, s Sprite) ecs.Entity {
 	e := w.Create()
-	ecs.MustAdd[Transform](w, e, t)
-	ecs.MustAdd[Color](w, e, c)
-	ecs.MustAdd[Sprite](w, e, s)
+	c.Transform.Set(e, t)
+	c.Color.Set(e, col)
+	c.Sprite.Set(e, s)
+	c.Transform.Wake(e)
 	return e
 }
 

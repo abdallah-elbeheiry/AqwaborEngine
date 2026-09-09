@@ -1,85 +1,53 @@
 package ecs
 
-import (
-	"unsafe"
-
-	"github.com/abdallah-elbeheiry/AqwaborEngine/logx"
-)
-
-// cmdKind enumerates the types of deferred commands.
-type cmdKind uint8
-
-const (
-	cmdCreate cmdKind = iota
-	cmdDestroy
-	cmdAdd
-	cmdRemove
-	cmdAttach
-	cmdDetach
-)
-
-// command is a single deferred structural operation.
-type command struct {
-	kind        cmdKind
-	entity      Entity
-	componentID ComponentID
-	data        unsafe.Pointer
-	handle      Handle
-	cascade     bool
-}
-
-// commandBuffer collects structural operations and applies them on Flush.
+// A commandBuffer defers structural change. A system iterating a dense array
+// cannot create or destroy entities as it goes, because both move rows; it
+// records the intent here and the change lands at a stage boundary, where
+// nothing is mid-iteration.
+//
+// Only entity lifetime is buffered. Component values are deferred by the caller
+// capturing them in the closure, which keeps the buffer free of the type
+// erasure that made the previous version carry raw pointers.
 type commandBuffer struct {
-	commands []command
+	destroy []Entity
+	apply_  []func(*World)
 }
 
-func newCommandBuffer(l *logx.Logger) *commandBuffer {
-	l.Debug("command buffer created")
+func newCommandBuffer() *commandBuffer {
 	return &commandBuffer{
-		commands: make([]command, 0, 64),
+		destroy: make([]Entity, 0, 64),
+		apply_:  make([]func(*World), 0, 64),
 	}
 }
 
-func (b *commandBuffer) push(cmd command) {
-	b.commands = append(b.commands, cmd)
-}
+// Destroy retires e at the next flush.
+func (b *commandBuffer) Destroy(e Entity) { b.destroy = append(b.destroy, e) }
 
-func (b *commandBuffer) len() int {
-	return len(b.commands)
-}
+// Do runs fn against the world at the next flush. A system spawning an entity
+// with components writes that here, so the spawn happens where no iteration is
+// in progress.
+func (b *commandBuffer) Do(fn func(*World)) { b.apply_ = append(b.apply_, fn) }
+
+// Len is how many changes are pending.
+func (b *commandBuffer) Len() int { return len(b.destroy) + len(b.apply_) }
 
 func (b *commandBuffer) clear() {
-	b.commands = b.commands[:0]
+	b.destroy = b.destroy[:0]
+	b.apply_ = b.apply_[:0]
 }
 
-// apply executes all buffered commands against the world.
+// apply runs the buffered work in the order it was recorded, deferred
+// functions first so an entity created and destroyed in one tick is not
+// destroyed before it exists.
 func (b *commandBuffer) apply(w *World) {
-	if len(b.commands) == 0 {
+	if b.Len() == 0 {
 		return
 	}
-
-	w.log.Debug("flushing command buffer", "commands", len(b.commands))
-
-	for _, cmd := range b.commands {
-		switch cmd.kind {
-		case cmdCreate:
-			w.entities.create(w.log)
-		case cmdDestroy:
-			w.destroyEntity(cmd.entity, cmd.cascade)
-		case cmdAdd:
-			info := w.registry.componentInfoFor(cmd.componentID)
-			if info != nil {
-				w.addComponent(cmd.entity, cmd.componentID, cmd.data, info.size)
-			}
-		case cmdRemove:
-			w.removeComponent(cmd.entity, cmd.componentID)
-		case cmdAttach:
-			w.attachHandle(cmd.entity, cmd.componentID, cmd.handle)
-		case cmdDetach:
-			w.detachComponent(cmd.entity, cmd.componentID)
-		}
+	for _, fn := range b.apply_ {
+		fn(w)
 	}
-
-	w.log.Debug("flush complete", "applied", len(b.commands))
+	for _, e := range b.destroy {
+		w.Destroy(e)
+	}
 	b.clear()
 }
