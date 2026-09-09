@@ -43,9 +43,17 @@ logx.Level() // effective level (zerolog.Level), handy for diagnostics
 Engine-internal logging follows a strict volume policy so games built on the
 engine stay quiet by default:
 
-- **Trace** — noisiest plumbing, *off by default*. Per-tick / per-frame / per-poll bodies: scheduler tick entry, every `Draw`/`DrawPolygon` submission, buffer uploads, pipeline binds, raw input samples, `ParallelFor` chunks. Anything that scales with Hz, FPS, or input rate.
-- **Debug** — engine diagnostics, safe to leave on during development but still *not* per-frame: lifecycle (`Start`/`Stop`/window create/close), setup config (registered Hz, `SetSpeed`, effective level), and rare anomalies (recoverable draw error, fallback pipeline path, backend selection).
-- **Info+** — process milestones (`window ready`, clean shutdown) and real problems (`WARN`/`ERROR`/`FATAL`). Never reclassify these into Trace/Debug.
+- **Trace** — noisiest plumbing, *off by default*. Anything that scales with entity count, Hz, FPS or
+  input rate: entity creation and destruction, component attach and detach, scheduler tick entry,
+  draw submissions, buffer uploads, raw input samples.
+- **Debug** — engine diagnostics, safe to leave on during development but not per-frame: lifecycle
+  (`Start`, `Stop`, window create and close), setup (registered rates, `SetSpeed`, effective level),
+  and rare anomalies (a recoverable draw error, a fallback path, backend selection).
+- **Info and above** — process milestones (world created, window ready, clean shutdown), one-off
+  registrations, and real problems. Never reclassify these downward.
+
+The structural operations of the entity system sit at Trace for exactly this reason. They used to
+sit at Info, which is the default, so every game paid for a log line per entity it created.
 
 ```go
 logx.Trace("draw submitted", "vertices", n)     // scales with FPS -> Trace
