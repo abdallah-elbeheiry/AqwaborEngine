@@ -1,3 +1,8 @@
+---
+title: Releasing the engine
+tags: [engine, aqwabor, release]
+---
+
 # Releasing the engine
 
 Go has no publish step and no registry.
