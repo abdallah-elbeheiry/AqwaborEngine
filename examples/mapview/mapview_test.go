@@ -14,7 +14,7 @@ func TestMapViewComposes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	asset, err := app.Images().Load("../examples/fox.png")
+	asset, err := app.Images().Load("../fox.png")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +40,7 @@ func TestMapViewDraws(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	asset, err := app.Images().Load("../examples/fox.png")
+	asset, err := app.Images().Load("../fox.png")
 	if err != nil {
 		t.Fatal(err)
 	}

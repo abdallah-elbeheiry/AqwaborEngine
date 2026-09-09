@@ -1,40 +1,12 @@
-package maprender
+// Package triangulate provides ear-clipping triangulation for closed ring
+// polygons. It is a pure algorithm with no engine dependencies.
+package triangulate
 
-// Ring triangulation for map fills.
-//
-// The map arrives as closed rings, not triangles, so something has to turn a
-// coastline into an interior before it can reach a triangle-list pipeline.
-// This is ear clipping: repeatedly cut off a corner that contains no other
-// vertex, until three vertices remain.
-//
-// Coordinates are converted to float64 degrees here. The int32 storage exists
-// so the simulation stays deterministic across machines; a triangulation is a
-// rendering artifact that never feeds back into the simulation, so floats are
-// safe on this side of the boundary and keep the geometric predicates well
-// within precision.
-
-// ringClipper holds one ring as a doubly linked list, so removing a clipped
-// vertex costs two pointer writes and invalidates only its two neighbours.
-// A slice with copy() would re-sweep the whole ring after every clip, which on
-// the 22,908-vertex ring in this dataset is the difference between a usable
-// load and a stalled one.
-type ringClipper struct {
-	xs, ys []float64
-	prev   []int32
-	next   []int32
-	reflex []bool
-	// relaxed lets a vertex lying exactly on an ear's edge pass instead of
-	// blocking it. Coordinates are quantised to 1.11 cm, so exact collinearity
-	// is common enough that the strict test stalls on real rings.
-	relaxed bool
-	ccw     bool
-}
-
-// triangulateRing returns triangle corner indices local to the ring, three per
-// triangle. Input is interleaved x,y in scaled degrees; scale converts them to
-// degrees. Never returns nil for a ring of three or more vertices: a ring that
-// defeats ear clipping falls back to a fan.
-func triangulateRing(coords []int32, scale float64) []int32 {
+// Ring returns triangle corner indices local to the ring, three per triangle.
+// Input is interleaved x,y in scaled degrees; scale converts them to degrees.
+// Never returns nil for a ring of three or more vertices: a ring that defeats
+// ear clipping falls back to a fan.
+func Ring(coords []int32, scale float64) []int32 {
 	n := len(coords) / 2
 
 	// Every closed ring in this dataset repeats its first vertex at the end,
@@ -59,7 +31,7 @@ func triangulateRing(coords []int32, scale float64) []int32 {
 
 	// Ear clipping assumes counter-clockwise input. Rings arrive in either
 	// winding, so the link order absorbs the flip and the coordinates stay put.
-	c.ccw = signedArea2(coords, scale) >= 0
+	c.ccw = SignedArea2(coords, scale) >= 0
 	for i := range n {
 		c.xs[i] = float64(coords[i*2]) / scale
 		c.ys[i] = float64(coords[i*2+1]) / scale
@@ -81,13 +53,22 @@ func triangulateRing(coords []int32, scale float64) []int32 {
 	return fanFallback(n)
 }
 
+// ringClipper holds one ring as a doubly linked list, so removing a clipped
+// vertex costs two pointer writes and invalidates only its two neighbours.
+type ringClipper struct {
+	xs, ys  []float64
+	prev    []int32
+	next    []int32
+	reflex  []bool
+	relaxed bool
+	ccw     bool
+}
+
 // clip runs ear clipping to completion, or returns nil if it stalls.
 func (c *ringClipper) clip(n int) []int32 {
 	out := make([]int32, 0, (n-2)*3)
 	remaining := n
 	cur := int32(0)
-	// Every vertex may be rejected once before an ear is found, so a full lap
-	// without a clip means no ear exists.
 	stall := 0
 	for remaining > 3 {
 		p, nx := c.prev[cur], c.next[cur]
@@ -112,10 +93,6 @@ func (c *ringClipper) clip(n int) []int32 {
 	return out
 }
 
-// isEar reports whether the corner at b is a convex corner containing no other
-// vertex of the ring.
-// reset relinks the ring into its original order, so a failed pass can be
-// retried without rebuilding the coordinates.
 func (c *ringClipper) reset(n int) {
 	for i := range n {
 		if c.ccw {
@@ -135,9 +112,6 @@ func (c *ringClipper) isEar(a, b, d int32, remaining int) bool {
 	if c.reflex[b] {
 		return false
 	}
-	// Only a reflex vertex can sit inside an ear, and only one inside the
-	// ear's bounding box. Both tests are here because the box test is four
-	// comparisons against three cross products.
 	minX := min(c.xs[a], c.xs[b], c.xs[d])
 	maxX := max(c.xs[a], c.xs[b], c.xs[d])
 	minY := min(c.ys[a], c.ys[b], c.ys[d])
@@ -167,8 +141,6 @@ func (c *ringClipper) orient(a, b, d int32) float64 {
 
 func (c *ringClipper) pointInTri(p, a, b, d int32) bool {
 	if c.relaxed {
-		// Strictly inside, so a vertex sitting exactly on an edge no longer
-		// blocks the ear.
 		return c.orient(a, b, p) > 0 && c.orient(b, d, p) > 0 && c.orient(d, a, p) > 0
 	}
 	return c.orient(a, b, p) >= 0 && c.orient(b, d, p) >= 0 && c.orient(d, a, p) >= 0
@@ -182,9 +154,9 @@ func fanFallback(n int) []int32 {
 	return out
 }
 
-// signedArea2 is twice the signed area in degrees squared; positive is
+// SignedArea2 is twice the signed area in degrees squared; positive is
 // counter-clockwise.
-func signedArea2(coords []int32, scale float64) float64 {
+func SignedArea2(coords []int32, scale float64) float64 {
 	s := 0.0
 	n := len(coords) / 2
 	for i := range n {

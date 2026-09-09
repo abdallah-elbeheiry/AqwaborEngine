@@ -205,12 +205,7 @@ func (r *Renderer) DrawInstancedIndirect(mesh *Mesh, cull *CullPipeline, slot in
 
 // --- Camera ---
 
-// DrawMapMesh draws every rank of the pre-built map geometry.
-func (r *Renderer) DrawMapMesh(mesh *MapMesh, pipe *MapPipeline) {
-	r.DrawMapMeshAtRank(mesh, pipe, MaxRank)
-}
-
-// DrawMapMeshAtRank draws the map at one level of detail, which is a smaller
+// DrawMapMeshAtRank draws geometry at one level of detail, which is a smaller
 // vertex count per pass rather than any per-frame work: the geometry was
 // ordered by rank when the mesh was built, so a level of detail is a prefix.
 func (r *Renderer) DrawMapMeshAtRank(mesh *MapMesh, pipe *MapPipeline, maxRank int) {
@@ -332,9 +327,9 @@ func (r *Renderer) CommandEncoder() *wgpu.CommandEncoder { return r.enc }
 // Used by the GPU facade for compute cull binding.
 func (r *Renderer) CameraBuffer() *wgpu.Buffer { return r.instPipe.CameraBuffer() }
 
-// SetMapPipeline registers a map pipeline so SetCamera can update its camera
-// uniform alongside the sprite and stroke pipelines.
-func (r *Renderer) SetMapPipeline(p *MapPipeline) { r.mapPipe = p }
+// SetFillPipeline registers the polygon fill pipeline so SetCamera can update
+// its camera uniform alongside the other pipelines.
+func (r *Renderer) SetFillPipeline(p *MapPipeline) { r.mapPipe = p }
 
 // Release releases GPU resources.
 func (r *Renderer) Release() {

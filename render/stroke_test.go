@@ -150,7 +150,7 @@ func TestMergeStrokeRanges(t *testing.T) {
 func TestSimplifyPolyline(t *testing.T) {
 	// Points within minSegPx should be skipped.
 	coords := []int32{0, 0, 1, 0, 2, 0, 100, 0}
-	points := simplifyPolyline(coords, false, 5, 1)
+	points := simplifyPolyline(coords, false, 5)
 	if len(points) != 2 {
 		t.Fatalf("got %d points, want 2 (0,0 and 100,0)", len(points))
 	}

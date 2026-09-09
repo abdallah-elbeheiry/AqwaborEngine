@@ -1,7 +1,6 @@
 package render
 
 import (
-	"github.com/abdallah-elbeheiry/AqwaborEngine/mapdata"
 	"github.com/gogpu/wgpu"
 )
 
@@ -9,30 +8,19 @@ import (
 // segments to draw at that level of detail. Segments are emitted in ascending
 // rank, so a level of detail is a prefix.
 //
-// BuildMapStrokes extracts polylines from all stroke passes and builds
-// StrokeSegments for GPU expansion.  Fills are not included — use
-// BuildMapMesh (with fillsOnly=true) for those.
-//
-// Each DrawOrder pass with a StrokeColor contributes segments for every
-// geometry in its layer.  Closed rings are closed polylines.
+// It operates on generic StrokeGeometry rather than map-specific types.
 func BuildMapStrokes(
 	dev *wgpu.Device,
-	world *mapdata.World,
+	strokeGeoms []StrokeGeometry,
 	strokeWidthPx float32,
 	minSegmentPx float32,
 ) (*StrokeBuffer, [MaxRank + 1]int) {
 	// Pre-count: worst case one segment per coordinate pair across all strokes.
 	total := 0
-	for _, pass := range world.DrawOrder {
-		if pass.StrokeColor == nil {
-			continue
-		}
-		layer := &world.Layers[pass.LayerIndex]
-		for _, gid := range layer.GeomIDs {
-			n := int(world.GeomN[gid])
-			if n >= 2 {
-				total += n - 1
-			}
+	for i := range strokeGeoms {
+		n := len(strokeGeoms[i].Coords) / 2
+		if n >= 2 {
+			total += n - 1
 		}
 	}
 
@@ -43,51 +31,27 @@ func BuildMapStrokes(
 
 	allSegs := make([]StrokeSegment, 0, total)
 
-	for _, pass := range world.DrawOrder {
-		if pass.StrokeColor == nil {
+	for _, sg := range strokeGeoms {
+		n := len(sg.Coords) / 2
+		if n < 2 {
 			continue
 		}
-		c := pass.StrokeColor
-		color := [4]float32{
-			float32(clamp255(c.R)) / 255,
-			float32(clamp255(c.G)) / 255,
-			float32(clamp255(c.B)) / 255,
-			float32(clamp255(c.A)) / 255,
-		}
-		layer := &world.Layers[pass.LayerIndex]
-		closed := layer.Kind == mapdata.KindRing
 
-		for _, gid := range sortedByRank(world, layer.GeomIDs, pass.RankFilter) {
-			n := int(world.GeomN[gid])
-			if n < 2 {
-				continue
-			}
-			s := int(world.GeomStart[gid])
-			coords := world.Coords[s : s+n*2]
+		// Simplify: skip short segments.
+		points := simplifyPolyline(sg.Coords, sg.Closed, minSegmentPx)
 
-			// Simplify: skip short segments (same logic as old emitMapStroke).
-			points := simplifyPolyline(coords, closed, minSegmentPx, float32(world.Scale))
+		segs := BuildSegments(
+			points,
+			sg.Color,
+			strokeWidthPx,
+			WidthModePixels,
+			0, // layer 0 for now; draw order comes from pass ordering
+		)
+		allSegs = append(allSegs, segs...)
 
-			segs := BuildSegments(
-				points,
-				color,
-				strokeWidthPx,
-				WidthModePixels,
-				0, // layer 0 for now; draw order comes from pass ordering
-			)
-			allSegs = append(allSegs, segs...)
-
-			if pass.RankFilter {
-				r := clampRank(int(world.GeomRank[gid]))
-				for i := r; i <= MaxRank; i++ {
-					byRank[i] = len(allSegs)
-				}
-			}
-		}
-		if !pass.RankFilter {
-			for i := range byRank {
-				byRank[i] = len(allSegs)
-			}
+		r := clampRank(sg.Rank)
+		for i := r; i <= MaxRank; i++ {
+			byRank[i] = len(allSegs)
 		}
 	}
 
@@ -106,18 +70,13 @@ func BuildMapStrokes(
 }
 
 // simplifyPolyline converts int32 coords to float32 points and skips
-// segments shorter than minSegPx (in pixels at the reference zoom).
-// This replicates the old CPU min-segment filter.
-func simplifyPolyline(coords []int32, closed bool, minSegPx, scale float32) [][2]float32 {
+// segments shorter than minSegPx.
+func simplifyPolyline(coords []int32, closed bool, minSegPx float32) [][2]float32 {
 	n := len(coords) / 2
 	if n < 2 {
 		return nil
 	}
-	if scale <= 0 {
-		scale = 1
-	}
-	// minSegPx in world units: 1 pixel = 1 raw unit (positions are raw int32).
-	minSeg2 := float32(minSegPx * minSegPx)
+	minSeg2 := minSegPx * minSegPx
 
 	points := make([][2]float32, 0, n)
 	points = append(points, [2]float32{float32(coords[0]), float32(coords[1])})
@@ -133,7 +92,6 @@ func simplifyPolyline(coords []int32, closed bool, minSegPx, scale float32) [][2
 		lastX, lastY = x, y
 	}
 	if closed && len(points) >= 2 {
-		// Close the polyline: ensure last point connects back to first.
 		first := points[0]
 		dx := first[0] - lastX
 		dy := first[1] - lastY

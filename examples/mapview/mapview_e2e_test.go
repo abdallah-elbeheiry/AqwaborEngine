@@ -44,7 +44,7 @@ func wheel(a *gapp.App, delta, at geometry.Point) {
 func TestMapViewE2E(t *testing.T) {
 	a := gapp.New()
 	mgr := ui.NewImageManager()
-	asset, err := mgr.Load("../examples/fox.png")
+	asset, err := mgr.Load("../fox.png")
 	if err != nil {
 		t.Fatal(err)
 	}
