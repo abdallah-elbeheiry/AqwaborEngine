@@ -202,30 +202,45 @@ No GPU pointers live in components — the ECS enforces PoD registration.
 ### Registration
 
 ```go
-render.MustRegisterECS(w)  // or render.RegisterECS(w) for error return
+comps := render.MustRegisterECS(w)   // or render.RegisterECS(w) for an error
 ```
 
-Registers all four component types. Call once at startup before spawning.
+Registers all four component types and returns the handles for them. Keep what it returns: a handle
+is the only way to reach a component, and it is not recoverable from the world afterwards.
 
 ### Spawning
 
 ```go
-e := render.SpawnSprite(w,
+e := render.SpawnSprite(w, comps,
     render.Transform{X: 100, Y: 200, SX: 48, SY: 48},
     render.Color{R: 1, G: 0, B: 0, A: 1},
     render.Sprite{Layer: 0},
 )
 ```
 
+A spawned sprite is awake in the `Transform` store, because extraction walks the awake rows and a
+sprite that is not in that set is not drawn.
+
 ### Extracting to batch
 
 ```go
-batch := gfx.Sprites(1024)  // persistent, created once
-render.ExtractSprites(w, batch)  // fills batch from all Transform+Sprite entities
+batch := gfx.Sprites(1024)        // persistent, created once
+render.ExtractSprites(comps, batch)
 ```
 
-`ExtractSprites` iterates all entities with `Transform` + `Sprite` (optionally
-`Color`; defaults to white). Zero-scale defaults to 1.
+`ExtractSprites` walks the awake rows of `Transform` and takes `Sprite` per entity, with `Color`
+where present and white where not. Zero scale defaults to 1.
+
+Sleeping a sprite's `Transform` takes it out of the batch without destroying it, which is how a
+sprite is hidden without costing anything per frame:
+
+```go
+comps.Transform.Sleep(e)
+comps.Transform.Wake(e)
+```
+
+Writing past the batch capacity grows it rather than panicking, so a scene larger than the number
+guessed at startup costs one reallocation.
 
 ### Drawing
 
@@ -233,8 +248,9 @@ render.ExtractSprites(w, batch)  // fills batch from all Transform+Sprite entiti
 render.DrawWorld(gfx, batch, dc, clear, viewProj, viewW, viewH, bounds, 64)
 ```
 
-Full-frame helper: `SetCamera` → `Begin` → draw (with GPU cull if
-`batch.Count() >= cullThreshold`) → `End`.
+Full-frame helper: `Begin` → `SetCamera` → cull and draw if the batch is at or above
+`cullThreshold` → `End`. It follows the frame's two phases, so the cull is encoded before the render
+pass opens.
 
 ### Sharing colours
 
