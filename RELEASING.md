@@ -22,6 +22,11 @@ release.
 
 Nothing else has to happen. A consumer gets the new version with `go get`.
 
+Cut the tag with git rather than in the web interface.
+Publishing a release there creates the tag as a side effect, so the workflow arrives second and finds
+the release already made; it recovers by editing that release, but the notes and the prerelease flag
+are then written on a second pass instead of on the first.
+
 ## A tag is immutable once it is published
 
 The moment the proxy has served a version, it caches it permanently, and the checksum database
@@ -38,6 +43,10 @@ Tags that were never pushed are free to delete. Only publication is final.
 ## Version numbers
 
 `vMAJOR.MINOR.PATCH`.
+
+The `v` is part of the version rather than decoration.
+Go does not recognise a tag without it: `0.1.0` resolves to a pseudo-version of the commit, and no
+consumer can ask for that release by name.
 
 Patch is a fix that changes no API.
 Minor is new API that existing code keeps compiling against.
@@ -77,9 +86,14 @@ it gives the version a name that two people can say to each other.
 It is the gate that matters, because a tag cut off a broken master is the one mistake the release
 process cannot undo.
 
-`release.yml` runs only on `v*` tags. It repeats those checks against the tagged commit rather than
-trusting the branch run, publishes the release, and asks the module proxy for the new version so the
-first consumer is not the one waiting for it to be fetched.
+`release.yml` runs on every tag. A tag that cannot become a Go version fails it in the first job,
+because filtering the workflow to `v*` instead made a mistyped tag do nothing at all, which is
+indistinguishable from a workflow that is broken. A valid one repeats those checks against the tagged
+commit rather than trusting the branch run, publishes the release, and asks the module proxy for the
+new version so the first consumer is not the one waiting for it to be fetched.
+
+It creates the release, or edits it where one already exists, so the same run works whether the tag
+arrived from git or from a release published in the web interface.
 
 Release notes are built from `git log` subjects, which is why the commit convention already in use
 here — `feat:`, `fix:`, `refactor:` — is worth keeping. GitHub's own generated notes list merged
