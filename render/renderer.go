@@ -204,9 +204,15 @@ func (r *Renderer) DrawInstancedIndirect(mesh *Mesh, cull *CullPipeline) {
 
 // --- Camera ---
 
-// DrawMapMesh draws pre-built map geometry with the map pipeline.
-// Must be called inside an active render pass.
+// DrawMapMesh draws every rank of the pre-built map geometry.
 func (r *Renderer) DrawMapMesh(mesh *MapMesh, pipe *MapPipeline) {
+	r.DrawMapMeshAtRank(mesh, pipe, MaxRank)
+}
+
+// DrawMapMeshAtRank draws the map at one level of detail, which is a smaller
+// vertex count per pass rather than any per-frame work: the geometry was
+// ordered by rank when the mesh was built, so a level of detail is a prefix.
+func (r *Renderer) DrawMapMeshAtRank(mesh *MapMesh, pipe *MapPipeline, maxRank int) {
 	if mesh == nil || mesh.Buffer == nil || mesh.Total == 0 {
 		return
 	}
@@ -217,12 +223,13 @@ func (r *Renderer) DrawMapMesh(mesh *MapMesh, pipe *MapPipeline) {
 	r.pass.SetBindGroup(0, pipe.BindGroup(), nil)
 	r.pass.SetVertexBuffer(0, mesh.Buffer, 0)
 	for _, pass := range mesh.Passes {
-		if pass.Count == 0 {
+		count := pass.CountFor(maxRank)
+		if count == 0 {
 			continue
 		}
-		r.pass.Draw(pass.Count, 1, pass.Offset, 0)
+		r.pass.Draw(count, 1, pass.Offset, 0)
 		r.stats.DrawCalls++
-		r.stats.Triangles += int(pass.Count) / 3
+		r.stats.Triangles += int(count) / 3
 	}
 }
 
@@ -280,7 +287,16 @@ func (r *Renderer) UpdateStrokeCamera(viewProj [16]float32, viewportW, viewportH
 // Each segment is expanded into a screen-space quad by the vertex shader.
 // Flushes pending dirty ranges automatically.
 func (r *Renderer) DrawStrokes(segments *StrokeBuffer) {
-	if segments.Count() == 0 {
+	r.DrawStrokesN(segments, segments.Count())
+}
+
+// DrawStrokesN draws the first n segments. Map strokes are ordered by rank when
+// they are built, so a level of detail is a smaller n.
+func (r *Renderer) DrawStrokesN(segments *StrokeBuffer, n int) {
+	if n > segments.Count() {
+		n = segments.Count()
+	}
+	if n <= 0 {
 		return
 	}
 	if !r.ensurePass() {
@@ -293,11 +309,11 @@ func (r *Renderer) DrawStrokes(segments *StrokeBuffer) {
 	r.pass.SetVertexBuffer(0, r.strokePipe.QuadVertexBuffer(), 0)
 	r.pass.SetVertexBuffer(1, segments.Buffer(), 0)
 	r.pass.SetIndexBuffer(r.strokePipe.QuadIndexBuffer(), gputypes.IndexFormatUint16, 0)
-	r.pass.DrawIndexed(6, uint32(segments.Count()), 0, 0, 0)
+	r.pass.DrawIndexed(6, uint32(n), 0, 0, 0)
 
 	r.stats.DrawCalls++
-	r.stats.Instances += segments.Count()
-	r.stats.Triangles += 2 * segments.Count() // 2 triangles per segment quad
+	r.stats.Instances += n
+	r.stats.Triangles += 2 * n // 2 triangles per segment quad
 }
 
 // --- Accessors ---

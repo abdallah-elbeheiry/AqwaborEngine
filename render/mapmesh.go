@@ -2,6 +2,7 @@ package render
 
 import (
 	"math"
+	"sort"
 	"unsafe"
 
 	"github.com/abdallah-elbeheiry/AqwaborEngine/mapdata"
@@ -9,10 +10,51 @@ import (
 	"github.com/gogpu/wgpu"
 )
 
-// PassRange records the vertex range for one DrawOrder pass in the shared buffer.
+// MaxRank is the highest rank the data uses. The filter clamps to 0..12, so a
+// pass keeps one cumulative count per rank in that range.
+const MaxRank = 12
+
+// PassRange records the vertex range for one DrawOrder pass in the shared
+// buffer, and how much of that range each level of detail needs.
+//
+// Geometry within a pass is emitted in ascending rank order, so everything up to
+// a given rank is a prefix of the range. Drawing a level of detail is then a
+// smaller Count rather than a per-frame cull: ByRank[r] is how many vertices to
+// draw when the maximum rank is r.
 type PassRange struct {
 	Offset uint32
 	Count  uint32
+	ByRank [MaxRank + 1]uint32
+}
+
+// CountFor is how many vertices to draw at the given maximum rank.
+func (p PassRange) CountFor(maxRank int) uint32 {
+	if maxRank < 0 {
+		maxRank = 0
+	}
+	if maxRank > MaxRank {
+		maxRank = MaxRank
+	}
+	return p.ByRank[maxRank]
+}
+
+// metresPerDegree is one degree of latitude at the equator, and is what turns
+// camera zoom into the ground resolution the rank filter is written against.
+const metresPerDegree = 110540
+
+// RankForZoom is the maximum rank worth drawing at a given zoom, which is the
+// filter the map data documents: the more ground a pixel covers, the fewer
+// minor rivers and lakes are worth drawing.
+//
+// Drawing every minor feature at a whole-world view is visual mud regardless of
+// what it costs, which is why this came back after the CPU cull did not.
+func RankForZoom(zoom float32) int {
+	if zoom <= 0 {
+		return MaxRank
+	}
+	mpx := metresPerDegree / float64(zoom)
+	v := 16 - 3*math.Log10(math.Max(mpx, 1e-6))
+	return int(math.Max(0, math.Min(MaxRank, v)))
 }
 
 // MapMesh holds pre-built GPU geometry for the entire map.
@@ -48,7 +90,14 @@ func BuildMapMesh(
 		layer := &world.Layers[pass.LayerIndex]
 		start := uint32(len(vertices))
 
-		for _, geomID := range layer.GeomIDs {
+		// Emit in ascending rank, so the geometry for any level of detail is a
+		// prefix of this pass's range. A pass the data does not rank-filter is
+		// emitted as it comes and every rank draws all of it.
+		ids := sortedByRank(world, layer.GeomIDs, pass.RankFilter)
+
+		var byRank [MaxRank + 1]uint32
+		filled := 0
+		for _, geomID := range ids {
 			n := int(world.GeomN[geomID])
 			if n < 2 {
 				continue
@@ -64,12 +113,29 @@ func BuildMapMesh(
 				emitMapStroke(&vertices, coords, layer.Kind == mapdata.KindRing,
 					*pass.StrokeColor, cfg.StrokeWidthPx, cfg.MinSegmentPx, cfg.RefZoom, float32(world.Scale))
 			}
+
+			if pass.RankFilter {
+				r := clampRank(int(world.GeomRank[geomID]))
+				for filled <= r {
+					byRank[filled] = uint32(len(vertices)) - start
+					filled++
+				}
+				byRank[r] = uint32(len(vertices)) - start
+			}
 		}
 
-		passes = append(passes, PassRange{
-			Offset: start,
-			Count:  uint32(len(vertices)) - start,
-		})
+		count := uint32(len(vertices)) - start
+		if !pass.RankFilter {
+			for i := range byRank {
+				byRank[i] = count
+			}
+		} else {
+			for i := filled; i <= MaxRank; i++ {
+				byRank[i] = count
+			}
+		}
+
+		passes = append(passes, PassRange{Offset: start, Count: count, ByRank: byRank})
 	}
 
 	total := uint32(len(vertices))
@@ -217,4 +283,29 @@ func clamp255(v float32) uint32 {
 		return 255
 	}
 	return uint32(v * 255)
+}
+
+func clampRank(r int) int {
+	if r < 0 {
+		return 0
+	}
+	if r > MaxRank {
+		return MaxRank
+	}
+	return r
+}
+
+// sortedByRank orders a pass's geometry so that everything at or below a rank
+// comes first. Sorting is stable, so geometry of equal rank keeps the order the
+// data gave it, which is what keeps two builds of the same world identical.
+func sortedByRank(world *mapdata.World, ids []int32, rankFilter bool) []int32 {
+	if !rankFilter || len(ids) < 2 {
+		return ids
+	}
+	out := make([]int32, len(ids))
+	copy(out, ids)
+	sort.SliceStable(out, func(i, j int) bool {
+		return world.GeomRank[out[i]] < world.GeomRank[out[j]]
+	})
+	return out
 }
