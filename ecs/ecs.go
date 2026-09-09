@@ -69,7 +69,9 @@ func (w *World) destroyEntity(e Entity, cascade bool) {
 		return
 	}
 
-	w.log.Info("destroying entity", "entity", e, "cascade", cascade)
+	if w.log.Enabled(logx.TraceLevel) {
+		w.log.Trace("destroying entity", "entity", e, "cascade", cascade)
+	}
 
 	meta := w.entities.meta(e)
 
@@ -180,7 +182,9 @@ func (w *World) attachHandle(e Entity, componentID ComponentID, h Handle) error 
 	newTableID := w.tableGraph.transitionAdd(currentTable, componentID, w.log)
 	w.moveEntityToTable(e, meta, currentTable, newTableID)
 
-	w.log.Info("component attached", "entity", e, "component_id", componentID)
+	if w.log.Enabled(logx.TraceLevel) {
+		w.log.Trace("component attached", "entity", e, "component_id", componentID)
+	}
 	return nil
 }
 
@@ -231,7 +235,9 @@ func (w *World) detachComponent(e Entity, componentID ComponentID) {
 	newTableID := w.tableGraph.transitionRemove(currentTable, componentID, w.log)
 	w.moveEntityToTable(e, meta, currentTable, newTableID)
 
-	w.log.Info("component detached", "entity", e, "component_id", componentID)
+	if w.log.Enabled(logx.TraceLevel) {
+		w.log.Trace("component detached", "entity", e, "component_id", componentID)
+	}
 }
 
 // --- Convenience: create + attach in one step ---

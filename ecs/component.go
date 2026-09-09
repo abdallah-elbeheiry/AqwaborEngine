@@ -198,7 +198,9 @@ func (p *componentPool) create(info *componentInfo, data unsafe.Pointer, l *logx
 
 	h := newHandle(idx, gen)
 	p.byType[info.id] = append(p.byType[info.id], h)
-	l.Debug("component instance created", "handle_index", idx, "handle_gen", gen, "component_id", info.id, "type", info.typ)
+	if l.Enabled(logx.TraceLevel) {
+		l.Trace("component instance created", "handle_index", idx, "handle_gen", gen, "component_id", info.id, "type", info.typ)
+	}
 	return h
 }
 
@@ -209,7 +211,9 @@ func (p *componentPool) acquire(h Handle, l *logx.Logger) error {
 		return &ErrHandleInvalid{Handle: h}
 	}
 	inst.refcount++
-	l.Debug("component acquired", "index", h.index, "refcount", inst.refcount)
+	if l.Enabled(logx.TraceLevel) {
+		l.Trace("component acquired", "index", h.index, "refcount", inst.refcount)
+	}
 	return nil
 }
 
@@ -220,7 +224,9 @@ func (p *componentPool) release(h Handle, l *logx.Logger) (zeroed bool, err erro
 		return false, &ErrHandleInvalid{Handle: h}
 	}
 	inst.refcount--
-	l.Debug("component released", "index", h.index, "refcount", inst.refcount)
+	if l.Enabled(logx.TraceLevel) {
+		l.Trace("component released", "index", h.index, "refcount", inst.refcount)
+	}
 	return inst.refcount <= 0, nil
 }
 
@@ -231,7 +237,9 @@ func (p *componentPool) destroy(h Handle, l *logx.Logger) {
 	}
 	p.instances[h.index].generation++
 	p.freeList = append(p.freeList, h.index)
-	l.Info("component instance destroyed", "index", h.index, "generation", h.generation)
+	if l.Enabled(logx.TraceLevel) {
+		l.Trace("component instance destroyed", "index", h.index, "generation", h.generation)
+	}
 }
 
 // get returns the pool instance, or false if the handle is stale.

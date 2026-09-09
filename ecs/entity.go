@@ -72,7 +72,9 @@ func (a *entityAllocator) create(l *logx.Logger) Entity {
 		})
 	}
 	e := newEntity(idx, a.metas[idx].generation)
-	l.Debug("entity created", "entity", e, "index", idx, "generation", a.metas[idx].generation)
+	if l.Enabled(logx.TraceLevel) {
+		l.Trace("entity created", "entity", e, "index", idx, "generation", a.metas[idx].generation)
+	}
 	return e
 }
 
@@ -89,7 +91,9 @@ func (a *entityAllocator) destroy(e Entity, l *logx.Logger) {
 	meta.alive = false
 	meta.components = nil
 	a.freeList = append(a.freeList, idx)
-	l.Info("entity destroyed", "entity", e, "index", idx, "generation", meta.generation)
+	if l.Enabled(logx.TraceLevel) {
+		l.Trace("entity destroyed", "entity", e, "index", idx, "generation", meta.generation)
+	}
 }
 
 func (a *entityAllocator) alive(e Entity) bool {
