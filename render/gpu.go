@@ -122,13 +122,10 @@ func (g *GPU) End() {
 // --- Camera ---
 
 // SetCamera updates the camera view-projection for all registered pipelines
-// (sprite, stroke, and fill if set via Renderer.SetFillPipeline).
+// (sprite, stroke, and subcell if created).
 func (g *GPU) SetCamera(viewProj [16]float32, viewportW, viewportH float32) {
 	g.r.UpdateCamera(viewProj, viewportW, viewportH)
 	g.r.UpdateStrokeCamera(viewProj, viewportW, viewportH)
-	if g.r.mapPipe != nil {
-		g.r.mapPipe.UpdateCamera(g.r.queue, viewProj, viewportW, viewportH)
-	}
 	if g.r.subcellPipe != nil {
 		g.r.subcellPipe.UpdateCamera(g.r.queue, viewProj, viewportW, viewportH)
 	}
@@ -272,6 +269,19 @@ func (g *GPU) DrawStrokes(segments *StrokeBuffer) {
 	g.r.DrawStrokes(segments)
 }
 
+// --- Custom pipelines ---
+
+// DrawVertices submits a non-indexed draw with a custom pipeline and bind group.
+// Use this for pipelines created outside the Renderer (e.g. custom geometry).
+func (g *GPU) DrawVertices(pipe *wgpu.RenderPipeline, bindGroup *wgpu.BindGroup, vertexBuffer *wgpu.Buffer, vertexCount uint32) {
+	g.r.DrawVertices(pipe, bindGroup, vertexBuffer, vertexCount)
+}
+
+// DrawVerticesRange submits a non-indexed draw for a sub-range of a vertex buffer.
+func (g *GPU) DrawVerticesRange(pipe *wgpu.RenderPipeline, bindGroup *wgpu.BindGroup, vertexBuffer *wgpu.Buffer, vertexCount, firstVertex uint32) {
+	g.r.DrawVerticesRange(pipe, bindGroup, vertexBuffer, vertexCount, firstVertex)
+}
+
 // --- Accessors ---
 
 // Device returns the wgpu device.
@@ -285,9 +295,6 @@ func (g *GPU) SurfaceFormat() gputypes.TextureFormat { return g.r.SurfaceFormat(
 
 // Stats returns per-frame rendering metrics.
 func (g *GPU) Stats() FrameStats { return g.r.Stats() }
-
-// Renderer returns the underlying Renderer for cases that need direct access.
-func (g *GPU) Renderer() *Renderer { return g.r }
 
 // Release releases all GPU resources.
 func (g *GPU) Release() {

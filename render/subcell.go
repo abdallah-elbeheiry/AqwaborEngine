@@ -112,7 +112,7 @@ func NewSubcellPipeline(dev *wgpu.Device, queue *wgpu.Queue, format gputypes.Tex
 		return b
 	}
 	uniform := gputypes.BufferUsageUniform | gputypes.BufferUsageCopyDst
-	p.cameraBuf = newBuf("subcell camera", cameraUniformSize, uniform)
+	p.cameraBuf = newBuf("subcell camera", CameraUniformSize, uniform)
 	p.rampBuf = newBuf("ramp table", rampTableSize, uniform)
 	p.cellBuf = newBuf("cell size", cellUniformSize, uniform)
 
@@ -143,7 +143,7 @@ func NewSubcellPipeline(dev *wgpu.Device, queue *wgpu.Queue, format gputypes.Tex
 		Label:  "subcell bg",
 		Layout: p.bgl,
 		Entries: []wgpu.BindGroupEntry{
-			{Binding: 0, Buffer: p.cameraBuf, Size: cameraUniformSize},
+			{Binding: 0, Buffer: p.cameraBuf, Size: CameraUniformSize},
 			{Binding: 1, Buffer: p.rampBuf, Size: rampTableSize},
 			{Binding: 2, Buffer: p.cellBuf, Size: cellUniformSize},
 		},
@@ -165,7 +165,7 @@ func NewSubcellPipeline(dev *wgpu.Device, queue *wgpu.Queue, format gputypes.Tex
 			EntryPoint: "fs_main",
 			Targets: []gputypes.ColorTargetState{{
 				Format:    p.format,
-				Blend:     blendAlpha(),
+				Blend:     BlendAlpha(),
 				WriteMask: gputypes.ColorWriteMaskAll,
 			}},
 		},
@@ -198,7 +198,7 @@ func (p *SubcellPipeline) SetCellSize(queue *wgpu.Queue, w, h float32) {
 // UpdateCamera writes the view-projection and viewport.
 func (p *SubcellPipeline) UpdateCamera(queue *wgpu.Queue, viewProj [16]float32, viewportW, viewportH float32) {
 	u := CameraUniform{ViewProj: viewProj, Viewport: [2]float32{viewportW, viewportH}}
-	src := unsafe.Slice((*byte)(unsafe.Pointer(&u)), cameraUniformSize)
+	src := unsafe.Slice((*byte)(unsafe.Pointer(&u)), CameraUniformSize)
 	queue.WriteBuffer(p.cameraBuf, 0, src)
 }
 

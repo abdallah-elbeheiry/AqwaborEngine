@@ -62,7 +62,7 @@ func NewStrokePipeline(dev *wgpu.Device, format gputypes.TextureFormat) *StrokeP
 	// Camera uniform buffer
 	sp.cameraBuf, err = dev.CreateBuffer(&wgpu.BufferDescriptor{
 		Label: "stroke camera",
-		Size:  cameraUniformSize,
+		Size:  CameraUniformSize,
 		Usage: gputypes.BufferUsageUniform | gputypes.BufferUsageCopyDst,
 	})
 	if err != nil {
@@ -98,7 +98,7 @@ func NewStrokePipeline(dev *wgpu.Device, format gputypes.TextureFormat) *StrokeP
 		Label:  "stroke bg",
 		Layout: sp.bgl,
 		Entries: []wgpu.BindGroupEntry{
-			{Binding: 0, Buffer: sp.cameraBuf, Size: cameraUniformSize},
+			{Binding: 0, Buffer: sp.cameraBuf, Size: CameraUniformSize},
 		},
 	})
 	if err != nil {
@@ -157,7 +157,7 @@ func NewStrokePipeline(dev *wgpu.Device, format gputypes.TextureFormat) *StrokeP
 			EntryPoint: "fs_main",
 			Targets: []gputypes.ColorTargetState{{
 				Format:    sp.format,
-				Blend:     blendAlpha(),
+				Blend:     BlendAlpha(),
 				WriteMask: gputypes.ColorWriteMaskAll,
 			}},
 		},
@@ -178,7 +178,7 @@ func (sp *StrokePipeline) UpdateCamera(queue *wgpu.Queue, viewProj [16]float32, 
 		ViewProj: viewProj,
 		Viewport: [2]float32{viewportW, viewportH},
 	}
-	src := unsafe.Slice((*byte)(unsafe.Pointer(&u)), cameraUniformSize)
+	src := unsafe.Slice((*byte)(unsafe.Pointer(&u)), CameraUniformSize)
 	queue.WriteBuffer(sp.cameraBuf, 0, src)
 }
 

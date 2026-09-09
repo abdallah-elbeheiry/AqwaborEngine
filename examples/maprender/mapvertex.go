@@ -1,4 +1,4 @@
-package render
+package maprender
 
 import "github.com/gogpu/gputypes"
 
@@ -10,8 +10,8 @@ type MapVertex struct {
 	R, G, B, A uint8
 }
 
-// mapVertexLayout describes the buffer layout for MapVertex.
-var mapVertexLayout = gputypes.VertexBufferLayout{
+// MapVertexLayout describes the buffer layout for MapVertex.
+var MapVertexLayout = gputypes.VertexBufferLayout{
 	ArrayStride: 12,
 	StepMode:    gputypes.VertexStepModeVertex,
 	Attributes: []gputypes.VertexAttribute{

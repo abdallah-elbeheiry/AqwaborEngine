@@ -1,9 +1,10 @@
-package render
+package maprender
 
 import (
 	_ "embed"
 	"unsafe"
 
+	"github.com/abdallah-elbeheiry/AqwaborEngine/render"
 	"github.com/gogpu/gputypes"
 	"github.com/gogpu/wgpu"
 )
@@ -51,7 +52,7 @@ func NewMapPipeline(dev *wgpu.Device, format gputypes.TextureFormat) *MapPipelin
 
 	p.cameraBuf, err = dev.CreateBuffer(&wgpu.BufferDescriptor{
 		Label: "map camera",
-		Size:  cameraUniformSize,
+		Size:  render.CameraUniformSize,
 		Usage: gputypes.BufferUsageUniform | gputypes.BufferUsageCopyDst,
 	})
 	if err != nil {
@@ -86,7 +87,7 @@ func NewMapPipeline(dev *wgpu.Device, format gputypes.TextureFormat) *MapPipelin
 		Label:  "map bg",
 		Layout: p.bgl,
 		Entries: []wgpu.BindGroupEntry{
-			{Binding: 0, Buffer: p.cameraBuf, Size: cameraUniformSize},
+			{Binding: 0, Buffer: p.cameraBuf, Size: render.CameraUniformSize},
 		},
 	})
 	if err != nil {
@@ -99,14 +100,14 @@ func NewMapPipeline(dev *wgpu.Device, format gputypes.TextureFormat) *MapPipelin
 		Vertex: wgpu.VertexState{
 			Module:     vertMod,
 			EntryPoint: "vs_main",
-			Buffers:    []gputypes.VertexBufferLayout{mapVertexLayout},
+			Buffers:    []gputypes.VertexBufferLayout{MapVertexLayout},
 		},
 		Fragment: &wgpu.FragmentState{
 			Module:     fragMod,
 			EntryPoint: "fs_main",
 			Targets: []gputypes.ColorTargetState{{
 				Format:    p.format,
-				Blend:     blendAlpha(),
+				Blend:     render.BlendAlpha(),
 				WriteMask: gputypes.ColorWriteMaskAll,
 			}},
 		},
@@ -124,11 +125,11 @@ func NewMapPipeline(dev *wgpu.Device, format gputypes.TextureFormat) *MapPipelin
 // UpdateCamera writes the shared camera uniform (viewProj + viewport) to the GPU.
 // Matches the same 80-byte layout used by the sprite and stroke pipelines.
 func (p *MapPipeline) UpdateCamera(queue *wgpu.Queue, viewProj [16]float32, viewportW, viewportH float32) {
-	u := CameraUniform{
+	u := render.CameraUniform{
 		ViewProj: viewProj,
 		Viewport: [2]float32{viewportW, viewportH},
 	}
-	src := unsafe.Slice((*byte)(unsafe.Pointer(&u)), cameraUniformSize)
+	src := unsafe.Slice((*byte)(unsafe.Pointer(&u)), render.CameraUniformSize)
 	queue.WriteBuffer(p.cameraBuf, 0, src)
 }
 

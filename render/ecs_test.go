@@ -30,11 +30,11 @@ func TestSpawnSprite(t *testing.T) {
 	w := ecs.NewWorld()
 	comps := MustRegisterECS(w)
 
-	e := SpawnSprite(w, comps,
-		Transform{X: 10, Y: 20, SX: 2, SY: 2},
-		Color{R: 1, G: 0, B: 0, A: 1},
-		Sprite{Layer: 1, Flags: 42},
-	)
+	e := w.Create()
+	comps.Transform.Set(e, Transform{X: 10, Y: 20, SX: 2, SY: 2})
+	comps.Color.Set(e, Color{R: 1, G: 0, B: 0, A: 1})
+	comps.Sprite.Set(e, Sprite{Layer: 1, Flags: 42})
+	comps.Transform.Wake(e)
 
 	if !w.Alive(e) {
 		t.Fatal("entity should be alive")
@@ -62,16 +62,16 @@ func TestSpawnSprite(t *testing.T) {
 	}
 }
 
-// A spawned sprite is awake, because extraction walks the awake rows and a
-// sprite that is not in that set is not drawn. Shared component instances are
-// gone with the pool that backed them: one dense array per type has no place to
-// put a value two entities point at, and colour sharing is answered by the
-// palette index the instance layout carries instead.
 func TestSpawnedSpriteIsAwake(t *testing.T) {
 	w := ecs.NewWorld()
 	comps := MustRegisterECS(w)
 
-	e := SpawnSprite(w, comps, Transform{}, Color{R: 1, A: 1}, Sprite{})
+	e := w.Create()
+	comps.Transform.Set(e, Transform{})
+	comps.Color.Set(e, Color{R: 1, A: 1})
+	comps.Sprite.Set(e, Sprite{})
+	comps.Transform.Wake(e)
+
 	if !comps.Transform.Awake(e) {
 		t.Fatal("a spawned sprite is asleep, so extraction will not see it")
 	}

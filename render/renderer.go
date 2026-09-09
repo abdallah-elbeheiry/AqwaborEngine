@@ -38,7 +38,6 @@ type Renderer struct {
 
 	instPipe    *Pipeline        // instanced draws
 	strokePipe  *StrokePipeline  // screen-space-width polylines
-	mapPipe     *MapPipeline     // map fill geometry (optional)
 	subcellPipe *SubcellPipeline // compact palette-indexed cells (created on demand)
 
 	stats FrameStats
@@ -205,32 +204,6 @@ func (r *Renderer) DrawInstancedIndirect(mesh *Mesh, cull *CullPipeline, slot in
 
 // --- Camera ---
 
-// DrawMapMeshAtRank draws geometry at one level of detail, which is a smaller
-// vertex count per pass rather than any per-frame work: the geometry was
-// ordered by rank when the mesh was built, so a level of detail is a prefix.
-func (r *Renderer) DrawMapMeshAtRank(mesh *MapMesh, pipe *MapPipeline, maxRank int) {
-	if mesh == nil || mesh.Buffer == nil || mesh.Total == 0 {
-		return
-	}
-	if !r.ensurePass() {
-		return
-	}
-	r.pass.SetPipeline(pipe.Pipeline())
-	r.pass.SetBindGroup(0, pipe.BindGroup(), nil)
-	r.pass.SetVertexBuffer(0, mesh.Buffer, 0)
-	for _, pass := range mesh.Passes {
-		count := pass.CountFor(maxRank)
-		if count == 0 {
-			continue
-		}
-		r.pass.Draw(count, 1, pass.Offset, 0)
-		r.stats.DrawCalls++
-		r.stats.Triangles += int(count) / 3
-	}
-}
-
-// --- Camera ---
-
 // UpdateCamera updates the camera uniform for instanced draws.
 func (r *Renderer) UpdateCamera(viewProj [16]float32, viewportW, viewportH float32) {
 	r.instPipe.UpdateCamera(r.queue, viewProj, viewportW, viewportH)
@@ -312,6 +285,40 @@ func (r *Renderer) DrawStrokesN(segments *StrokeBuffer, n int) {
 	r.stats.Triangles += 2 * n // 2 triangles per segment quad
 }
 
+// --- Generic draws ---
+
+// DrawVertices submits a non-indexed draw with a custom pipeline and bind group.
+// Use this for pipelines not built into the Renderer (e.g. custom geometry).
+func (r *Renderer) DrawVertices(pipe *wgpu.RenderPipeline, bindGroup *wgpu.BindGroup, vertexBuffer *wgpu.Buffer, vertexCount uint32) {
+	if vertexCount == 0 {
+		return
+	}
+	if !r.ensurePass() {
+		return
+	}
+	r.pass.SetPipeline(pipe)
+	r.pass.SetBindGroup(0, bindGroup, nil)
+	r.pass.SetVertexBuffer(0, vertexBuffer, 0)
+	r.pass.Draw(vertexCount, 1, 0, 0)
+	r.stats.DrawCalls++
+}
+
+// DrawVerticesRange submits a non-indexed draw for a sub-range of a vertex buffer.
+func (r *Renderer) DrawVerticesRange(pipe *wgpu.RenderPipeline, bindGroup *wgpu.BindGroup, vertexBuffer *wgpu.Buffer, vertexCount, firstVertex uint32) {
+	if vertexCount == 0 {
+		return
+	}
+	if !r.ensurePass() {
+		return
+	}
+	r.pass.SetPipeline(pipe)
+	r.pass.SetBindGroup(0, bindGroup, nil)
+	r.pass.SetVertexBuffer(0, vertexBuffer, 0)
+	r.pass.Draw(vertexCount, 1, firstVertex, 0)
+	r.stats.DrawCalls++
+	r.stats.Triangles += int(vertexCount) / 3
+}
+
 // --- Accessors ---
 
 func (r *Renderer) Device() *wgpu.Device                  { return r.dev }
@@ -326,10 +333,6 @@ func (r *Renderer) CommandEncoder() *wgpu.CommandEncoder { return r.enc }
 // CameraBuffer returns the instanced pipeline's camera uniform buffer.
 // Used by the GPU facade for compute cull binding.
 func (r *Renderer) CameraBuffer() *wgpu.Buffer { return r.instPipe.CameraBuffer() }
-
-// SetFillPipeline registers the polygon fill pipeline so SetCamera can update
-// its camera uniform alongside the other pipelines.
-func (r *Renderer) SetFillPipeline(p *MapPipeline) { r.mapPipe = p }
 
 // Release releases GPU resources.
 func (r *Renderer) Release() {

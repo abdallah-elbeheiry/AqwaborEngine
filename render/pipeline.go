@@ -22,7 +22,8 @@ type CameraUniform struct {
 	_        [8]byte     // padding to 80 bytes
 }
 
-const cameraUniformSize = 80
+// CameraUniformSize is the byte size of the CameraUniform struct (80 bytes).
+const CameraUniformSize = 80
 
 // Pipeline manages a single instanced render pipeline with its bind group.
 type Pipeline struct {
@@ -63,7 +64,7 @@ func (p *Pipeline) create(dev *wgpu.Device) {
 	// Camera uniform buffer
 	p.cameraBuf, err = dev.CreateBuffer(&wgpu.BufferDescriptor{
 		Label: "camera uniform",
-		Size:  cameraUniformSize,
+		Size:  CameraUniformSize,
 		Usage: gputypes.BufferUsageUniform | gputypes.BufferUsageCopyDst,
 	})
 	if err != nil {
@@ -100,7 +101,7 @@ func (p *Pipeline) create(dev *wgpu.Device) {
 		Label:  "instanced bg",
 		Layout: p.bgl,
 		Entries: []wgpu.BindGroupEntry{
-			{Binding: 0, Buffer: p.cameraBuf, Size: cameraUniformSize},
+			{Binding: 0, Buffer: p.cameraBuf, Size: CameraUniformSize},
 		},
 	})
 	if err != nil {
@@ -123,7 +124,7 @@ func (p *Pipeline) create(dev *wgpu.Device) {
 			EntryPoint: "fs_main",
 			Targets: []gputypes.ColorTargetState{{
 				Format:    p.format,
-				Blend:     blendAlpha(),
+				Blend:     BlendAlpha(),
 				WriteMask: gputypes.ColorWriteMaskAll,
 			}},
 		},
@@ -136,7 +137,8 @@ func (p *Pipeline) create(dev *wgpu.Device) {
 	}
 }
 
-func blendAlpha() *gputypes.BlendState {
+// BlendAlpha returns the standard alpha-blend state used by most pipelines.
+func BlendAlpha() *gputypes.BlendState {
 	s := gputypes.BlendStateAlpha()
 	return &s
 }
@@ -147,7 +149,7 @@ func (p *Pipeline) UpdateCamera(queue *wgpu.Queue, viewProj [16]float32, viewpor
 		ViewProj: viewProj,
 		Viewport: [2]float32{viewportW, viewportH},
 	}
-	src := unsafe.Slice((*byte)(unsafe.Pointer(&u)), cameraUniformSize)
+	src := unsafe.Slice((*byte)(unsafe.Pointer(&u)), CameraUniformSize)
 	queue.WriteBuffer(p.cameraBuf, 0, src)
 }
 

@@ -1,10 +1,11 @@
-package render
+package maprender
 
 import (
 	"math"
 	"sort"
 	"unsafe"
 
+	"github.com/abdallah-elbeheiry/AqwaborEngine/render"
 	"github.com/gogpu/gputypes"
 	"github.com/gogpu/wgpu"
 )
@@ -12,6 +13,10 @@ import (
 // MaxRank is the highest rank the data uses. The filter clamps to 0..12, so a
 // pass keeps one cumulative count per rank in that range.
 const MaxRank = 12
+
+// metresPerDegree is one degree of latitude at the equator, and is what turns
+// camera zoom into the ground resolution the rank filter is written against.
+const metresPerDegree = 110540
 
 // PassRange records the vertex range for one DrawOrder pass in the shared
 // buffer, and how much of that range each level of detail needs.
@@ -37,16 +42,9 @@ func (p PassRange) CountFor(maxRank int) uint32 {
 	return p.ByRank[maxRank]
 }
 
-// metresPerDegree is one degree of latitude at the equator, and is what turns
-// camera zoom into the ground resolution the rank filter is written against.
-const metresPerDegree = 110540
-
 // RankForZoom is the maximum rank worth drawing at a given zoom, which is the
 // filter the map data documents: the more ground a pixel covers, the fewer
 // minor rivers and lakes are worth drawing.
-//
-// Drawing every minor feature at a whole-world view is visual mud regardless of
-// what it costs, which is why this came back after the CPU cull did not.
 func RankForZoom(zoom float32) int {
 	if zoom <= 0 {
 		return MaxRank
@@ -69,6 +67,30 @@ type MapMeshConfig struct {
 	MinSegmentPx  float32
 	RefZoom       float32
 	Scale         float32
+}
+
+// FillGeometry is one triangulated polygon ready for GPU upload.
+type FillGeometry struct {
+	Coords []int32
+	Tris   []int32
+	Rank   int
+	Fill   render.Color
+}
+
+// StrokeGeometry is one polyline ready for GPU upload.
+type StrokeGeometry struct {
+	Coords []int32
+	Closed bool
+	Rank   int
+	Color  [4]float32
+}
+
+// DrawPassSpec describes one ordered group of geometries to draw together.
+type DrawPassSpec struct {
+	GeomIndices []int32
+	FillColor   *render.Color
+	StrokeColor *render.Color
+	RankFilter  bool
 }
 
 // BuildMapMesh triangulates fills and uploads them to a single GPU vertex
@@ -157,7 +179,7 @@ func BuildMapMesh(
 	return &MapMesh{Buffer: buf, Passes: passRanges, Total: total}
 }
 
-func emitFill(out *[]MapVertex, coords []int32, tris []int32, c Color) {
+func emitFill(out *[]MapVertex, coords []int32, tris []int32, c render.Color) {
 	cr, cg, cb, ca := quantizeColor(c)
 	n := len(coords) / 2
 	for _, idx := range tris {
@@ -172,23 +194,12 @@ func emitFill(out *[]MapVertex, coords []int32, tris []int32, c Color) {
 	}
 }
 
-func quantizeColor(c Color) (cr, cg, cb, ca uint8) {
-	cr = uint8(Clamp255(c.R))
-	cg = uint8(Clamp255(c.G))
-	cb = uint8(Clamp255(c.B))
-	ca = uint8(Clamp255(c.A))
+func quantizeColor(c render.Color) (cr, cg, cb, ca uint8) {
+	cr = uint8(render.Clamp255(c.R))
+	cg = uint8(render.Clamp255(c.G))
+	cb = uint8(render.Clamp255(c.B))
+	ca = uint8(render.Clamp255(c.A))
 	return
-}
-
-// Clamp255 clamps a float32 in [0,1] to a uint32 in [0,255].
-func Clamp255(v float32) uint32 {
-	if v <= 0 {
-		return 0
-	}
-	if v >= 1 {
-		return 255
-	}
-	return uint32(v * 255)
 }
 
 func clampRank(r int) int {

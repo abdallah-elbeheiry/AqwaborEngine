@@ -130,3 +130,36 @@ func BuildSegments(points [][2]float32, color [4]float32, width float32, flags u
 	}
 	return segs
 }
+
+// SimplifyPolyline converts int32 coords to float32 points and skips
+// segments shorter than minSegPx.
+func SimplifyPolyline(coords []int32, closed bool, minSegPx float32) [][2]float32 {
+	n := len(coords) / 2
+	if n < 2 {
+		return nil
+	}
+	minSeg2 := minSegPx * minSegPx
+
+	points := make([][2]float32, 0, n)
+	points = append(points, [2]float32{float32(coords[0]), float32(coords[1])})
+
+	lastX, lastY := float32(coords[0]), float32(coords[1])
+	for i := 1; i < n; i++ {
+		x, y := float32(coords[i*2]), float32(coords[i*2+1])
+		dx, dy := x-lastX, y-lastY
+		if dx*dx+dy*dy < minSeg2 {
+			continue
+		}
+		points = append(points, [2]float32{x, y})
+		lastX, lastY = x, y
+	}
+	if closed && len(points) >= 2 {
+		first := points[0]
+		dx := first[0] - lastX
+		dy := first[1] - lastY
+		if dx*dx+dy*dy >= minSeg2 {
+			points = append(points, first)
+		}
+	}
+	return points
+}
