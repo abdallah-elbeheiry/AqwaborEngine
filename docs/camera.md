@@ -1,3 +1,8 @@
+---
+title: Camera
+tags: [engine, aqwabor, camera]
+---
+
 # camera — 2D View Transform
 
 Minimal, widget-independent 2D view transform. `Camera` is the single source
@@ -16,13 +21,15 @@ Spawn a camera entity:
 
 ```go
 camE := w.Create()
-ecs.MustAdd[camera.Camera](w, camE, camera.Camera{
+camComp := camera.MustRegisterECS(w)
+camE := w.Create()
+camComp.Set(camE, camera.Camera{
     X: 180, Y: 90,
     MinZoom: 0.01,
     MaxZoom: 1000,
     Active:  1,
 })
-c, _ := ecs.Get[camera.Camera](w, camE)
+c, _ := camComp.Get(camE)
 c.Fit(360, 180, 1280, 720)  // center + best-fit zoom
 ```
 
@@ -60,8 +67,8 @@ Both return `[16]float32` column-major 4x4 for `render.GPU.SetCamera`.
 ### Typical world demo frame
 
 ```go
-c, _ := ecs.Get[camera.Camera](w, camE)
-scene, _ := ecs.Get[maprender.MapScene](w, mapE)
+c, _ := camComp.Get(camE)
+scene, _ := scenes.Component().Get(mapE)
 
 c.Pan(dx, dy)                    // input writes into Camera
 c.ZoomAt(factor, mx, my, vpW, vpH)
@@ -70,6 +77,6 @@ camera.ClampZoom(c)
 vpMat := render.ViewProjMap(*c, vpW, vpH, scene.WorldScale)
 gfx.SetCamera(vpMat, vpW, vpH)
 gfx.Begin(dc, render.Clear{R: scene.ClearR, ...})
-maprender.DrawECS(w, mapE)
+scenes.Draw(mapE)
 gfx.End()
 ```

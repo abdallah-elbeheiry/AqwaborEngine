@@ -1,3 +1,8 @@
+---
+title: Map rendering
+tags: [engine, aqwabor, maprender]
+---
+
 # maprender — Map Data to GPU
 
 Triangulates ring fills from `mapdata` and builds GPU-expanded stroke
@@ -36,14 +41,15 @@ The caller owns `Begin`/`End`. `Draw` only records draw calls.
 ### MapScene Component
 
 ```go
-maprender.MustRegisterECS(w)
+scenes := maprender.MustRegisterECS(w)
+sceneComp := scenes.Component()
 ```
 
 Registers the `MapScene` component (clear colour, world scale, active flag).
 
 ```go
 mapE := w.Create()
-ecs.MustAdd[maprender.MapScene](w, mapE, maprender.MapScene{
+sceneComp.Set(mapE, maprender.MapScene{
     ClearR: world.Background.R,
     ClearG: world.Background.G,
     ClearB: world.Background.B,
@@ -59,14 +65,14 @@ Heavy resources (renderer, mesh, strokes) live outside ECS in the `Renderer`.
 `Bind` associates an entity with its renderer:
 
 ```go
-maprender.Bind(mapE, rend)
+scenes.Bind(mapE, rend)
 maprender.Unbind(mapE)  // cleanup
 ```
 
 ### DrawECS
 
 ```go
-maprender.DrawECS(w, mapE)
+scenes.Draw(mapE)
 ```
 
 Reads `MapScene` from ECS, looks up bound renderer, calls `Draw()`. The caller
@@ -75,12 +81,12 @@ must own the render pass (`Begin`/`End`).
 ### Typical world demo frame
 
 ```go
-cam, _ := ecs.Get[camera.Camera](w, camE)
-scene, _ := ecs.Get[maprender.MapScene](w, mapE)
+cam, _ := camComp.Get(camE)
+scene, _ := sceneComp.Get(mapE)
 
 vpMat := render.ViewProjMap(*cam, vp.Width, vp.Height, scene.WorldScale)
 gfx.SetCamera(vpMat, vp.Width, vp.Height)
 gfx.Begin(dc, render.Clear{R: scene.ClearR, G: scene.ClearG, B: scene.ClearB, A: scene.ClearA})
-maprender.DrawECS(w, mapE)
+scenes.Draw(mapE)
 gfx.End()
 ```

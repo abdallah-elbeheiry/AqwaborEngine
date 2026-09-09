@@ -1,3 +1,8 @@
+---
+title: The render layer
+tags: [engine, aqwabor, render]
+---
+
 # render — GPU Submission Layer
 
 Single-path GPU API for game/world content. All drawing goes through the `GPU`
@@ -233,8 +238,12 @@ Full-frame helper: `SetCamera` → `Begin` → draw (with GPU cull if
 
 ### Sharing colours
 
-Use `ecs.Create[Color]` + `ecs.Attach[Color]` to share one colour instance
-across many sprite entities — no per-frame alloc.
+Shared component instances are gone with the pool that backed them: one dense array per type has
+nowhere to put a value two entities point at.
+
+Where many instances carry the same colour because it is an identity rather than an arbitrary value,
+that is what the palette index on the compact cell format is for. See the cell section above. For
+sprites, write the colour on each; it is four floats in a buffer that is written densely anyway.
 
 ### ViewProjMap
 

@@ -1,3 +1,8 @@
+---
+title: Input
+tags: [engine, aqwabor, input]
+---
+
 # Input System — Usage Guide
 
 A high-level, ergonomic input system for AqwaborEngine. You only ever work

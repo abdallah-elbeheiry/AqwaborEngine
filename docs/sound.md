@@ -1,3 +1,8 @@
+---
+title: Sound
+tags: [engine, aqwabor, sound]
+---
+
 # sound — Usage
 
 A small, engine-style audio package with a built-in mixer and CGO-free output
