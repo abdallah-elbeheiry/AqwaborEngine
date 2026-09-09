@@ -77,9 +77,10 @@ being dropped silently the way it used to be: the encoder was only reachable
 after the pass had opened, so the dispatch never ran, the indirect count stayed
 at the zero the reset wrote, and the draw drew nothing.
 
-**One cull a frame.** The output and indirect buffers are single, so a second
-cull would overwrite the first. A second call in one frame is refused and
-logged.
+**Eight culls a frame.** Each takes its own region of the output buffer, its own
+draw command and its own parameters, so they are independent. A ninth in one
+frame is refused and logged. A cull pipeline sized for N instances therefore
+holds eight times N instances of output; that is the cost of the slots.
 
 Growing the batch past the cull pipeline's capacity builds a larger pipeline and
 retires the old one for three frames before releasing it, because a submitted

@@ -22,12 +22,25 @@ type IndirectCmd struct {
 
 const indirectCmdSize = 20
 
+// cullSlots is how many culled draws one frame may issue. Each takes its own
+// region of the output buffer, its own indirect command and its own parameters,
+// because the compute pass writes them and the draw that follows reads them.
+// Sharing one set made a second culled draw overwrite the first.
+const cullSlots = 8
+
+// slotStride pads each slot's command and parameters out to the alignment a
+// uniform binding offset requires, which is the larger of the two constraints.
+const slotStride = 256
+
 // CullParams is the compute shader uniform for culling parameters.
 type CullParams struct {
 	InstanceCount uint32
-	_pad          uint32
-	MinBounds     [2]float32
-	MaxBounds     [2]float32
+	// OutputBase is the first index of this slot's region in the output buffer.
+	// The shader compacts survivors from there rather than from zero, which is
+	// what lets several culls share one buffer.
+	OutputBase uint32
+	MinBounds  [2]float32
+	MaxBounds  [2]float32
 }
 
 const cullParamsSize = 24
@@ -52,14 +65,19 @@ type CullPipeline struct {
 
 	// Cached bind group: rebuilt only when the input or camera buffer
 	// identity changes (avoids a CreateBindGroup per dispatch).
-	cachedBG     *wgpu.BindGroup
-	cachedInput  *wgpu.Buffer
-	cachedCamera *wgpu.Buffer
+	// One cached bind group per slot, each binding that slot's parameters at
+	// its own offset. Rebuilt only when the input or camera buffer identity
+	// changes, which avoids a CreateBindGroup per dispatch.
+	cached [cullSlots]slotBinding
 
-	// used marks that this frame has already spent its one cull. The output and
-	// indirect buffers are single: a second cull in a frame would overwrite the
-	// first, which used to happen silently.
-	used bool
+	// next is the slot the following cull this frame will take.
+	next int
+}
+
+type slotBinding struct {
+	bg     *wgpu.BindGroup
+	input  *wgpu.Buffer
+	camera *wgpu.Buffer
 }
 
 // NewCullPipeline creates the compute cull pipeline and GPU buffers.
@@ -81,7 +99,7 @@ func NewCullPipeline(dev *wgpu.Device, queue *wgpu.Queue, maxInstances int) *Cul
 
 	cp.indirectBuf, err = dev.CreateBuffer(&wgpu.BufferDescriptor{
 		Label: "indirect cmd",
-		Size:  indirectCmdSize,
+		Size:  slotStride * cullSlots,
 		Usage: gputypes.BufferUsageIndirect | gputypes.BufferUsageStorage | gputypes.BufferUsageCopyDst,
 	})
 	if err != nil {
@@ -90,7 +108,7 @@ func NewCullPipeline(dev *wgpu.Device, queue *wgpu.Queue, maxInstances int) *Cul
 
 	cp.outputBuf, err = dev.CreateBuffer(&wgpu.BufferDescriptor{
 		Label: "cull output",
-		Size:  uint64(maxInstances * instanceDataSize),
+		Size:  uint64(maxInstances * instanceDataSize * cullSlots),
 		Usage: gputypes.BufferUsageVertex | gputypes.BufferUsageStorage | gputypes.BufferUsageCopyDst,
 	})
 	if err != nil {
@@ -99,7 +117,7 @@ func NewCullPipeline(dev *wgpu.Device, queue *wgpu.Queue, maxInstances int) *Cul
 
 	cp.paramsBuf, err = dev.CreateBuffer(&wgpu.BufferDescriptor{
 		Label: "cull params",
-		Size:  cullParamsSize,
+		Size:  slotStride * cullSlots,
 		Usage: gputypes.BufferUsageUniform | gputypes.BufferUsageCopyDst,
 	})
 	if err != nil {
@@ -146,27 +164,27 @@ func NewCullPipeline(dev *wgpu.Device, queue *wgpu.Queue, maxInstances int) *Cul
 	return cp
 }
 
-// BeginFrame makes the pipeline's single cull available again. Call once a
-// frame, before any cull.
-func (cp *CullPipeline) BeginFrame() { cp.used = false }
+// BeginFrame returns the pipeline to its first slot. Call once a frame, before
+// any cull.
+func (cp *CullPipeline) BeginFrame() { cp.next = 0 }
 
-// Claim reserves this frame's cull, reporting false if it is already spent.
-// One culled draw a frame is the current limit: the output and indirect buffers
-// are single, and giving each cull its own region needs dynamic bind group
-// offsets and a base index in the shader.
-func (cp *CullPipeline) Claim() bool {
-	if cp.used {
-		return false
+// SlotsLeft is how many culled draws remain available this frame.
+func (cp *CullPipeline) SlotsLeft() int { return cullSlots - cp.next }
+
+// Claim reserves the next slot, reporting false when the frame is out of them.
+func (cp *CullPipeline) Claim() (int, bool) {
+	if cp.next >= cullSlots {
+		return 0, false
 	}
-	cp.used = true
-	return true
+	s := cp.next
+	cp.next++
+	return s, true
 }
 
-// ResetIndirect clears the instance count in the indirect command buffer.
-// Must be called before each cull dispatch (the compute shader atomically adds to it).
-// indexCount is the mesh index count (e.g. 6 for a unit quad); FirstInstance
-// is 0 because the shader compacts survivors into outputBuf from slot 0.
-func (cp *CullPipeline) ResetIndirect(indexCount uint32) {
+// ResetIndirect clears one slot's instance count. The compute shader adds to it
+// atomically, so it starts each cull at zero. FirstInstance stays zero because
+// the draw binds this slot's region of the output buffer directly.
+func (cp *CullPipeline) ResetIndirect(slot int, indexCount uint32) {
 	cmd := IndirectCmd{
 		IndexCount:    indexCount,
 		InstanceCount: 0,
@@ -175,30 +193,42 @@ func (cp *CullPipeline) ResetIndirect(indexCount uint32) {
 		FirstInstance: 0,
 	}
 	src := unsafe.Slice((*byte)(unsafe.Pointer(&cmd)), indirectCmdSize)
-	cp.queue.WriteBuffer(cp.indirectBuf, 0, src)
+	cp.queue.WriteBuffer(cp.indirectBuf, uint64(slot)*slotStride, src)
 }
+
+// OutputOffset is the byte offset of a slot's region in the output buffer,
+// which is what the draw binds the instance stream at.
+func (cp *CullPipeline) OutputOffset(slot int) uint64 {
+	return uint64(slot) * uint64(cp.maxInstances) * instanceDataSize
+}
+
+// IndirectOffset is the byte offset of a slot's draw command.
+func (cp *CullPipeline) IndirectOffset(slot int) uint64 { return uint64(slot) * slotStride }
 
 // EncodeDispatch records the compute cull pass into the command encoder.
 // inputBuf: the InstanceBuffer's GPU buffer with all instances.
 // cameraBuf: the camera uniform buffer (binding 3 in the shader).
 func (cp *CullPipeline) EncodeDispatch(
 	enc *wgpu.CommandEncoder,
+	slot int,
 	inputBuf *wgpu.Buffer,
 	cameraBuf *wgpu.Buffer,
 	instanceCount int,
 	minBounds, maxBounds [2]float32,
 ) {
-	// Write cull params
 	params := CullParams{
 		InstanceCount: uint32(instanceCount),
+		OutputBase:    uint32(slot * cp.maxInstances),
 		MinBounds:     minBounds,
 		MaxBounds:     maxBounds,
 	}
 	src := unsafe.Slice((*byte)(unsafe.Pointer(&params)), cullParamsSize)
-	cp.queue.WriteBuffer(cp.paramsBuf, 0, src)
+	cp.queue.WriteBuffer(cp.paramsBuf, uint64(slot)*slotStride, src)
 
-	// Reuse the cached bind group unless a buffer identity changed.
-	bg := cp.bindGroupFor(inputBuf, cameraBuf)
+	bg := cp.bindGroupFor(slot, inputBuf, cameraBuf)
+	if bg == nil {
+		return
+	}
 
 	pass, err := enc.BeginComputePass(&wgpu.ComputePassDescriptor{Label: "cull"})
 	if err != nil {
@@ -211,15 +241,19 @@ func (cp *CullPipeline) EncodeDispatch(
 	pass.End()
 }
 
-// bindGroupFor returns the cached bind group, rebuilding it only when the
-// input or camera buffer identity changes.
-func (cp *CullPipeline) bindGroupFor(inputBuf, cameraBuf *wgpu.Buffer) *wgpu.BindGroup {
-	if cp.cachedBG != nil && cp.cachedInput == inputBuf && cp.cachedCamera == cameraBuf {
-		return cp.cachedBG
+// bindGroupFor returns the cached bind group for one slot, rebuilding it only
+// when the input or camera buffer identity changes.
+//
+// Each slot binds its own parameters and its own indirect command at their
+// offsets, which is why there is a bind group per slot rather than one shared.
+func (cp *CullPipeline) bindGroupFor(slot int, inputBuf, cameraBuf *wgpu.Buffer) *wgpu.BindGroup {
+	b := &cp.cached[slot]
+	if b.bg != nil && b.input == inputBuf && b.camera == cameraBuf {
+		return b.bg
 	}
-	if cp.cachedBG != nil {
-		cp.cachedBG.Release()
-		cp.cachedBG = nil
+	if b.bg != nil {
+		b.bg.Release()
+		b.bg = nil
 	}
 	bg, err := cp.dev.CreateBindGroup(&wgpu.BindGroupDescriptor{
 		Label:  "cull bg",
@@ -227,17 +261,16 @@ func (cp *CullPipeline) bindGroupFor(inputBuf, cameraBuf *wgpu.Buffer) *wgpu.Bin
 		Entries: []wgpu.BindGroupEntry{
 			{Binding: 0, Buffer: inputBuf},
 			{Binding: 1, Buffer: cp.outputBuf},
-			{Binding: 2, Buffer: cp.indirectBuf},
+			{Binding: 2, Buffer: cp.indirectBuf, Offset: uint64(slot) * slotStride, Size: indirectCmdSize},
 			{Binding: 3, Buffer: cameraBuf},
-			{Binding: 4, Buffer: cp.paramsBuf},
+			{Binding: 4, Buffer: cp.paramsBuf, Offset: uint64(slot) * slotStride, Size: cullParamsSize},
 		},
 	})
 	if err != nil {
+		log.Error("failed to build the cull bind group", "slot", slot, "err", err)
 		return nil
 	}
-	cp.cachedBG = bg
-	cp.cachedInput = inputBuf
-	cp.cachedCamera = cameraBuf
+	b.bg, b.input, b.camera = bg, inputBuf, cameraBuf
 	return bg
 }
 
@@ -253,9 +286,11 @@ func (cp *CullPipeline) OutputBuffer() *wgpu.Buffer {
 
 // Release releases GPU resources.
 func (cp *CullPipeline) Release() {
-	if cp.cachedBG != nil {
-		cp.cachedBG.Release()
-		cp.cachedBG = nil
+	for i := range cp.cached {
+		if cp.cached[i].bg != nil {
+			cp.cached[i].bg.Release()
+			cp.cached[i].bg = nil
+		}
 	}
 	if cp.pipe != nil {
 		cp.pipe.Release()
