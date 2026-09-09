@@ -150,27 +150,29 @@ func runWorldDemo() {
 
 	// --- ECS setup ---
 	w := ecs.NewWorld()
-	camera.MustRegisterECS(w)
+	camComp := camera.MustRegisterECS(w)
 	render.MustRegisterECS(w)
-	maprender.MustRegisterECS(w)
+	scenes := maprender.MustRegisterECS(w)
+	sceneComp := scenes.Component()
 
 	// Camera entity — source of truth for all view state.
 	// Matches old behaviour: Fit centres, then position reset to origin.
 	vp := geometry.Sz(1280, 720)
 	camE := w.Create()
-	ecs.MustAdd[camera.Camera](w, camE, camera.Camera{
+	camComp.Set(camE, camera.Camera{
 		MinZoom: 0.01,
 		MaxZoom: 1000,
 		Active:  1,
 	})
-	c, _ := ecs.Get[camera.Camera](w, camE)
+	camComp.Wake(camE)
+	c, _ := camComp.Get(camE)
 	c.Fit(360, 180, vp.Width, vp.Height)
 	c.X = 0
 	c.Y = 0
 
 	// Map scene entity — clear colour + world scale.
 	mapE := w.Create()
-	ecs.MustAdd[maprender.MapScene](w, mapE, maprender.MapScene{
+	sceneComp.Set(mapE, maprender.MapScene{
 		ClearR:     world.Background.R,
 		ClearG:     world.Background.G,
 		ClearB:     world.Background.B,
@@ -178,10 +180,11 @@ func runWorldDemo() {
 		WorldScale: float32(world.Scale),
 		Active:     1,
 	})
+	sceneComp.Wake(mapE)
 
 	// Renderer — CPU fill triangulation in NewRenderer, GPU mesh built later.
 	rend := maprender.NewRenderer(world, 1, nil)
-	maprender.Bind(mapE, rend)
+	scenes.Bind(mapE, rend)
 
 	// --- Input ---
 	app := win.App()
@@ -198,7 +201,7 @@ func runWorldDemo() {
 	panAction := mgr.Action("pan")
 	mgr.BindMouseButton(panAction, input.MouseButtonLeft)
 	panAction.OnDrag(func(dx, dy float64, _ input.Context) {
-		c, ok := ecs.Get[camera.Camera](w, camE)
+		c, ok := camComp.Get(camE)
 		if !ok {
 			return
 		}
@@ -208,7 +211,7 @@ func runWorldDemo() {
 	zoomInAction := mgr.Action("zoom_in")
 	mgr.BindKey(zoomInAction, input.KeyEqual)
 	zoomInAction.OnPressed(func(_ input.Context) {
-		c, ok := ecs.Get[camera.Camera](w, camE)
+		c, ok := camComp.Get(camE)
 		if !ok {
 			return
 		}
@@ -219,7 +222,7 @@ func runWorldDemo() {
 	zoomOutAction := mgr.Action("zoom_out")
 	mgr.BindKey(zoomOutAction, input.KeyMinus)
 	zoomOutAction.OnPressed(func(_ input.Context) {
-		c, ok := ecs.Get[camera.Camera](w, camE)
+		c, ok := camComp.Get(camE)
 		if !ok {
 			return
 		}
@@ -230,7 +233,7 @@ func runWorldDemo() {
 	resetAction := mgr.Action("reset")
 	mgr.BindKey(resetAction, input.KeyR)
 	resetAction.OnPressed(func(_ input.Context) {
-		c, ok := ecs.Get[camera.Camera](w, camE)
+		c, ok := camComp.Get(camE)
 		if !ok {
 			return
 		}
@@ -253,7 +256,7 @@ func runWorldDemo() {
 
 		if gfx == nil {
 			gfx = render.New(win.DeviceProvider())
-			if c, ok := ecs.Get[camera.Camera](w, camE); ok {
+			if c, ok := camComp.Get(camE); ok {
 				rend.SetRefZoom(c.Zoom)
 			}
 			rend.SetRenderer(gfx.Renderer())
@@ -265,7 +268,7 @@ func runWorldDemo() {
 		scrollDy = 0
 		scrollMu.Unlock()
 		if sd != 0 {
-			c, ok := ecs.Get[camera.Camera](w, camE)
+			c, ok := camComp.Get(camE)
 			if ok {
 				factor := float32(1.1)
 				if sd < 0 {
@@ -277,14 +280,14 @@ func runWorldDemo() {
 		}
 
 		// Read components → build view-projection → draw.
-		cam, _ := ecs.Get[camera.Camera](w, camE)
-		scene, _ := ecs.Get[maprender.MapScene](w, mapE)
+		cam, _ := camComp.Get(camE)
+		scene, _ := sceneComp.Get(mapE)
 
 		rend.SetViewport(vp)
 		vpMat := render.ViewProjMap(*cam, float32(vp.Width), float32(vp.Height), scene.WorldScale)
 		gfx.SetCamera(vpMat, float32(vp.Width), float32(vp.Height))
 		gfx.Begin(dc, render.Clear{R: scene.ClearR, G: scene.ClearG, B: scene.ClearB, A: scene.ClearA})
-		maprender.DrawECS(w, mapE)
+		scenes.Draw(mapE)
 		gfx.End()
 	}); err != nil {
 		logx.Fatalf("window run failed: %v", err)

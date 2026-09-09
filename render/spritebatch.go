@@ -35,6 +35,10 @@ func (sb *SpriteBatch) SetAll(sprites []InstanceData) {
 // Count returns the number of sprites written this frame.
 func (sb *SpriteBatch) Count() int { return sb.buf.Count() }
 
+// Capacity is how many instances the batch can hold. A caller filling the batch
+// checks it rather than discovering the limit as a panic.
+func (sb *SpriteBatch) Capacity() int { return sb.buf.Capacity() }
+
 // Reset clears the batch for the next frame.
 func (sb *SpriteBatch) Reset() { sb.buf.Reset() }
 

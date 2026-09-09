@@ -9,11 +9,16 @@ import (
 
 func TestRegisterECSIdempotent(t *testing.T) {
 	w := ecs.NewWorld()
-	if err := RegisterECS(w); err != nil {
+	a, err := RegisterECS(w)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := RegisterECS(w); err != nil {
+	b, err := RegisterECS(w)
+	if err != nil {
 		t.Fatal("RegisterECS should be idempotent:", err)
+	}
+	if a.ID() != b.ID() {
+		t.Fatalf("second registration made a new component: %d then %d", a.ID(), b.ID())
 	}
 }
 

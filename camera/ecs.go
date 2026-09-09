@@ -12,16 +12,20 @@ type Camera struct {
 	Active  uint8 // 1 = primary camera
 }
 
-// RegisterECS registers the Camera component type with the given world.
-func RegisterECS(w *ecs.World) error {
+// RegisterECS registers the Camera component type and returns the handle used
+// to reach it. The handle is the only way to read or write a Camera, so a
+// caller keeps what this returns.
+func RegisterECS(w *ecs.World) (ecs.Comp[Camera], error) {
 	return ecs.Register[Camera](w)
 }
 
-// MustRegisterECS is like RegisterECS but panics on error.
-func MustRegisterECS(w *ecs.World) {
-	if err := RegisterECS(w); err != nil {
+// MustRegisterECS is RegisterECS, panicking on error.
+func MustRegisterECS(w *ecs.World) ecs.Comp[Camera] {
+	c, err := RegisterECS(w)
+	if err != nil {
 		panic("camera.RegisterECS: " + err.Error())
 	}
+	return c
 }
 
 // ViewProj builds a column-major 4x4 orthographic view-projection matrix from

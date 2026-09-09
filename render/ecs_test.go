@@ -8,11 +8,16 @@ import (
 
 func TestRegisterECSIdempotent(t *testing.T) {
 	w := ecs.NewWorld()
-	if err := RegisterECS(w); err != nil {
+	a, err := RegisterECS(w)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := RegisterECS(w); err != nil {
+	b, err := RegisterECS(w)
+	if err != nil {
 		t.Fatal("RegisterECS should be idempotent:", err)
+	}
+	if a.Transform.ID() != b.Transform.ID() {
+		t.Fatal("second registration made new components")
 	}
 }
 
@@ -23,9 +28,9 @@ func TestMustRegisterECS(t *testing.T) {
 
 func TestSpawnSprite(t *testing.T) {
 	w := ecs.NewWorld()
-	MustRegisterECS(w)
+	comps := MustRegisterECS(w)
 
-	e := SpawnSprite(w,
+	e := SpawnSprite(w, comps,
 		Transform{X: 10, Y: 20, SX: 2, SY: 2},
 		Color{R: 1, G: 0, B: 0, A: 1},
 		Sprite{Layer: 1, Flags: 42},
@@ -34,21 +39,21 @@ func TestSpawnSprite(t *testing.T) {
 	if !w.Alive(e) {
 		t.Fatal("entity should be alive")
 	}
-	tr, ok := ecs.Get[Transform](w, e)
+	tr, ok := comps.Transform.Get(e)
 	if !ok {
 		t.Fatal("missing Transform")
 	}
 	if tr.X != 10 || tr.Y != 20 || tr.SX != 2 || tr.SY != 2 {
 		t.Fatalf("Transform = %+v, want X=10 Y=20 SX=2 SY=2", tr)
 	}
-	c, ok := ecs.Get[Color](w, e)
+	col, ok := comps.Color.Get(e)
 	if !ok {
 		t.Fatal("missing Color")
 	}
-	if c.R != 1 || c.G != 0 || c.B != 0 || c.A != 1 {
-		t.Fatalf("Color = %+v, want R=1 G=0 B=0 A=1", c)
+	if col.R != 1 || col.G != 0 || col.B != 0 || col.A != 1 {
+		t.Fatalf("Color = %+v, want R=1 G=0 B=0 A=1", col)
 	}
-	s, ok := ecs.Get[Sprite](w, e)
+	s, ok := comps.Sprite.Get(e)
 	if !ok {
 		t.Fatal("missing Sprite")
 	}
@@ -57,20 +62,27 @@ func TestSpawnSprite(t *testing.T) {
 	}
 }
 
-func TestSpawnMultipleSharesColor(t *testing.T) {
+// A spawned sprite is awake, because extraction walks the awake rows and a
+// sprite that is not in that set is not drawn. Shared component instances are
+// gone with the pool that backed them: one dense array per type has no place to
+// put a value two entities point at, and colour sharing is answered by the
+// palette index the instance layout carries instead.
+func TestSpawnedSpriteIsAwake(t *testing.T) {
 	w := ecs.NewWorld()
-	MustRegisterECS(w)
+	comps := MustRegisterECS(w)
 
-	red := ecs.MustCreate[Color](w, Color{R: 1, A: 1})
-	e1 := w.Create()
-	e2 := w.Create()
-	ecs.MustAttach[Color](w, e1, red)
-	ecs.MustAttach[Color](w, e2, red)
+	e := SpawnSprite(w, comps, Transform{}, Color{R: 1, A: 1}, Sprite{})
+	if !comps.Transform.Awake(e) {
+		t.Fatal("a spawned sprite is asleep, so extraction will not see it")
+	}
+	if comps.Transform.AwakeLen() != 1 {
+		t.Fatalf("awake rows = %d, want 1", comps.Transform.AwakeLen())
+	}
 
-	c1, _ := ecs.Get[Color](w, e1)
-	c2, _ := ecs.Get[Color](w, e2)
-	if c1 != c2 {
-		t.Fatal("shared color handle should return same pointer")
+	seen := 0
+	ecs.Each2(comps.Transform, comps.Sprite, func(ecs.Entity, *Transform, *Sprite) { seen++ })
+	if seen != 1 {
+		t.Fatalf("extraction would see %d sprites, want 1", seen)
 	}
 }
 
