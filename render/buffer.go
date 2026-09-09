@@ -23,12 +23,27 @@ import (
 // handles them all), but a frame that rewrites every instance should not go
 // through N Write calls.
 type InstanceBuffer struct {
+	dev         *wgpu.Device
 	buffer      *wgpu.Buffer
 	cpuData     []InstanceData
 	capacity    int
 	dirtyRanges [][2]int // [start, end) in instances
 	count       int      // number of valid instances written this frame
+
+	// retired holds buffers replaced by a larger one. A frame already submitted
+	// may still be reading the old buffer, so it is released after enough
+	// frames have passed rather than at the moment it is replaced.
+	retired []retiredBuffer
+	frame   uint64
 }
+
+type retiredBuffer struct {
+	buf   *wgpu.Buffer
+	frame uint64
+}
+
+// bufferRetireAfter is how many frames a replaced buffer is held before release.
+const bufferRetireAfter = 3
 
 // NewInstanceBuffer creates a new instance buffer with the given capacity.
 // The buffer carries Storage usage so the compute cull pass can read it.
@@ -43,6 +58,7 @@ func NewInstanceBuffer(dev *wgpu.Device, capacity int) *InstanceBuffer {
 		panic(err)
 	}
 	return &InstanceBuffer{
+		dev:         dev,
 		buffer:      buf,
 		cpuData:     make([]InstanceData, capacity),
 		capacity:    capacity,
@@ -50,12 +66,95 @@ func NewInstanceBuffer(dev *wgpu.Device, capacity int) *InstanceBuffer {
 	}
 }
 
+// grow replaces the GPU buffer with one at least n instances long, doubling so
+// the amortised cost stays one copy an element. The CPU-side array carries over;
+// the GPU side is marked entirely dirty, because the new buffer holds nothing.
+//
+// Growing rather than panicking is the point: a game that spawns one more
+// sprite than the number guessed at startup used to crash.
+func (ib *InstanceBuffer) grow(n int) bool {
+	if n <= ib.capacity {
+		return true
+	}
+	if ib.dev == nil {
+		log.Error("instance buffer cannot grow without a device", "want", n, "capacity", ib.capacity)
+		return false
+	}
+
+	capacity := max(ib.capacity, 1)
+	for capacity < n {
+		capacity *= 2
+	}
+
+	buf, err := ib.dev.CreateBuffer(&wgpu.BufferDescriptor{
+		Label: "instance buffer",
+		Size:  uint64(capacity * instanceDataSize),
+		Usage: gputypes.BufferUsageVertex | gputypes.BufferUsageCopyDst | gputypes.BufferUsageStorage,
+	})
+	if err != nil {
+		log.Error("failed to grow the instance buffer", "capacity", capacity, "err", err)
+		return false
+	}
+
+	if ib.buffer != nil {
+		ib.retired = append(ib.retired, retiredBuffer{buf: ib.buffer, frame: ib.frame})
+	}
+	ib.buffer = buf
+
+	grown := make([]InstanceData, capacity)
+	copy(grown, ib.cpuData)
+	ib.cpuData = grown
+	ib.capacity = capacity
+
+	// Everything written so far has to be uploaded again: the new buffer is
+	// empty and the old one's contents did not travel with it.
+	ib.dirtyRanges = ib.dirtyRanges[:0]
+	if ib.count > 0 {
+		ib.dirtyRanges = append(ib.dirtyRanges, [2]int{0, ib.count})
+	}
+
+	log.Debug("instance buffer grew", "capacity", capacity)
+	return true
+}
+
+// BeginFrame advances the frame counter and releases buffers retired long
+// enough ago that no submitted frame can still be reading them.
+func (ib *InstanceBuffer) BeginFrame() {
+	ib.frame++
+	kept := ib.retired[:0]
+	for _, r := range ib.retired {
+		if ib.frame-r.frame >= bufferRetireAfter {
+			r.buf.Release()
+			continue
+		}
+		kept = append(kept, r)
+	}
+	ib.retired = kept
+}
+
+// Release frees the GPU buffer and anything still retired. A batch that is not
+// released leaks its buffer for the life of the process.
+func (ib *InstanceBuffer) Release() {
+	for _, r := range ib.retired {
+		r.buf.Release()
+	}
+	ib.retired = nil
+	if ib.buffer != nil {
+		ib.buffer.Release()
+		ib.buffer = nil
+	}
+}
+
 // Write marks a single instance slot for upload. Use this for sparse updates
 // where only a few instances change per frame. Does not compare old vs new.
 // For full-buffer rewrites use WriteAll instead.
 func (ib *InstanceBuffer) Write(index int, data *InstanceData) {
-	if index < 0 || index >= ib.capacity {
-		panic("instance index out of bounds")
+	if index < 0 {
+		log.Error("instance index is negative", "index", index)
+		return
+	}
+	if index >= ib.capacity && !ib.grow(index+1) {
+		return
 	}
 	if ib.count <= index {
 		ib.count = index + 1
@@ -69,8 +168,8 @@ func (ib *InstanceBuffer) Write(index int, data *InstanceData) {
 // where every live instance is rewritten.
 func (ib *InstanceBuffer) WriteAll(src []InstanceData) {
 	n := len(src)
-	if n > ib.capacity {
-		panic("WriteAll: src exceeds buffer capacity")
+	if n > ib.capacity && !ib.grow(n) {
+		return
 	}
 	copy(ib.cpuData[:n], src)
 	ib.count = n
@@ -87,19 +186,18 @@ func (ib *InstanceBuffer) WriteAt(start int, src []InstanceData) {
 	if n == 0 {
 		return
 	}
-	if start < 0 || start+n > ib.capacity {
-		panic("WriteAt: range exceeds buffer capacity")
+	if start < 0 {
+		log.Error("instance write starts before zero", "start", start)
+		return
+	}
+	if start+n > ib.capacity && !ib.grow(start+n) {
+		return
 	}
 	copy(ib.cpuData[start:start+n], src)
 	end := start + n
 	if ib.count < end {
 		ib.count = end
 	}
-	ib.dirtyRanges = append(ib.dirtyRanges, [2]int{start, end})
-}
-
-// markDirty is retained for clarity; callers above use append directly.
-func (ib *InstanceBuffer) markDirty(start, end int) {
 	ib.dirtyRanges = append(ib.dirtyRanges, [2]int{start, end})
 }
 
@@ -178,8 +276,12 @@ func (ib *InstanceBuffer) Reset() {
 // Useful when the caller has filled CPUData directly (e.g. via InstanceSlice)
 // and then calls WriteAll, or wants to control count independently.
 func (ib *InstanceBuffer) SetCount(n int) {
-	if n < 0 || n > ib.capacity {
-		panic("SetCount: out of range")
+	if n < 0 {
+		log.Error("instance count is negative", "n", n)
+		return
+	}
+	if n > ib.capacity && !ib.grow(n) {
+		return
 	}
 	ib.count = n
 }
@@ -189,8 +291,8 @@ func (ib *InstanceBuffer) SetCount(n int) {
 // This avoids per-slot Write calls when packing active instances into a
 // contiguous block (see particle.Emitter.WriteInstances).
 func InstanceSlice(ib *InstanceBuffer, n int) []InstanceData {
-	if n > ib.capacity {
-		panic("InstanceSlice: n exceeds buffer capacity")
+	if n > ib.capacity && !ib.grow(n) {
+		return nil
 	}
 	return ib.cpuData[:n:n]
 }
