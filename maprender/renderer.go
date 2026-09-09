@@ -31,6 +31,14 @@ type Renderer struct {
 
 	strokeBuf *render.StrokeBuffer // GPU-expanded strokes (new path)
 
+	// strokesByRank is how many stroke segments to draw at each level of
+	// detail, which the build works out by emitting them in rank order.
+	strokesByRank [render.MaxRank + 1]int
+
+	// zoom is the camera zoom the level of detail is chosen from. refZoom is
+	// what the mesh was built against and no longer selects detail.
+	zoom float32
+
 	strokeWidthPx float32
 	minSegmentPx  float32
 
@@ -42,6 +50,9 @@ type Renderer struct {
 type Stats struct {
 	Triangles   int
 	MetresPerPx float64
+	// MaxRank is the level of detail the last frame drew at, which is the
+	// number to look at when features appear or vanish unexpectedly.
+	MaxRank int
 }
 
 func (r *Renderer) Stats() Stats { return r.stats }
@@ -88,7 +99,7 @@ func (r *Renderer) buildGPUMesh() {
 	)
 
 	// Build GPU-expanded stroke segments (replaces baked quad soup).
-	r.strokeBuf = render.BuildMapStrokes(
+	r.strokeBuf, r.strokesByRank = render.BuildMapStrokes(
 		r.ren.Device(),
 		r.world,
 		r.strokeWidthPx,
@@ -153,7 +164,12 @@ func (r *Renderer) buildFills() {
 
 func (r *Renderer) SetViewport(vp geometry.Size) { r.viewport = vp }
 func (r *Renderer) SetRefZoom(z float32)         { r.refZoom = z }
-func (r *Renderer) SetStrokeWidth(px float32)    { r.strokeWidthPx = px }
+
+// SetZoom tells the renderer the camera's current zoom, which is what selects
+// the level of detail. Without it the map draws every rank at every zoom, which
+// is every minor river at a whole-world view.
+func (r *Renderer) SetZoom(z float32)         { r.zoom = z }
+func (r *Renderer) SetStrokeWidth(px float32) { r.strokeWidthPx = px }
 
 func (r *Renderer) Draw() {
 	if r.world == nil || r.ren == nil || r.mapMesh == nil || r.mapPipe == nil {
@@ -163,14 +179,21 @@ func (r *Renderer) Draw() {
 		return
 	}
 
-	r.stats = Stats{MetresPerPx: metresPerDegree / float64(r.refZoom)}
+	zoom := r.zoom
+	if zoom <= 0 {
+		zoom = r.refZoom
+	}
+	maxRank := render.RankForZoom(zoom)
+	r.stats = Stats{MetresPerPx: metresPerDegree / float64(zoom), MaxRank: maxRank}
 
-	// Fills (baked triangle mesh — still needed for filled regions).
-	r.ren.DrawMapMesh(r.mapMesh, r.mapPipe)
+	// Fills, at the level of detail this zoom is worth. The geometry was
+	// ordered by rank when the mesh was built, so this is a smaller vertex
+	// count rather than any per-frame work.
+	r.ren.DrawMapMeshAtRank(r.mapMesh, r.mapPipe, maxRank)
 
-	// Strokes (GPU-expanded centerlines — replaces baked quad soup).
+	// Strokes, the same way.
 	if r.strokeBuf != nil && r.strokeBuf.Count() > 0 {
-		r.ren.DrawStrokes(r.strokeBuf)
+		r.ren.DrawStrokesN(r.strokeBuf, r.strokesByRank[maxRank])
 	}
 
 	r.stats.Triangles = r.ren.Stats().Triangles
@@ -179,6 +202,7 @@ func (r *Renderer) Draw() {
 		r.lastLog = now
 		logx.Info("map frame",
 			"tris", r.stats.Triangles,
-			"m/px", int(r.stats.MetresPerPx))
+			"m/px", int(r.stats.MetresPerPx),
+			"max_rank", r.stats.MaxRank)
 	}
 }

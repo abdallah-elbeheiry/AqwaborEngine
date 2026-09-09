@@ -5,6 +5,10 @@ import (
 	"github.com/gogpu/wgpu"
 )
 
+// BuildMapStrokes returns the segment buffer and, per rank, how many of its
+// segments to draw at that level of detail. Segments are emitted in ascending
+// rank, so a level of detail is a prefix.
+//
 // BuildMapStrokes extracts polylines from all stroke passes and builds
 // StrokeSegments for GPU expansion.  Fills are not included — use
 // BuildMapMesh (with fillsOnly=true) for those.
@@ -16,7 +20,7 @@ func BuildMapStrokes(
 	world *mapdata.World,
 	strokeWidthPx float32,
 	minSegmentPx float32,
-) *StrokeBuffer {
+) (*StrokeBuffer, [MaxRank + 1]int) {
 	// Pre-count: worst case one segment per coordinate pair across all strokes.
 	total := 0
 	for _, pass := range world.DrawOrder {
@@ -32,8 +36,9 @@ func BuildMapStrokes(
 		}
 	}
 
+	var byRank [MaxRank + 1]int
 	if total == 0 {
-		return &StrokeBuffer{}
+		return &StrokeBuffer{}, byRank
 	}
 
 	allSegs := make([]StrokeSegment, 0, total)
@@ -52,7 +57,7 @@ func BuildMapStrokes(
 		layer := &world.Layers[pass.LayerIndex]
 		closed := layer.Kind == mapdata.KindRing
 
-		for _, gid := range layer.GeomIDs {
+		for _, gid := range sortedByRank(world, layer.GeomIDs, pass.RankFilter) {
 			n := int(world.GeomN[gid])
 			if n < 2 {
 				continue
@@ -71,16 +76,33 @@ func BuildMapStrokes(
 				0, // layer 0 for now; draw order comes from pass ordering
 			)
 			allSegs = append(allSegs, segs...)
+
+			if pass.RankFilter {
+				r := clampRank(int(world.GeomRank[gid]))
+				for i := r; i <= MaxRank; i++ {
+					byRank[i] = len(allSegs)
+				}
+			}
+		}
+		if !pass.RankFilter {
+			for i := range byRank {
+				byRank[i] = len(allSegs)
+			}
 		}
 	}
 
 	if len(allSegs) == 0 {
-		return &StrokeBuffer{}
+		return &StrokeBuffer{}, byRank
+	}
+	for i := range byRank {
+		if byRank[i] == 0 {
+			byRank[i] = len(allSegs)
+		}
 	}
 
 	buf := NewStrokeBuffer(dev, len(allSegs))
 	buf.WriteAll(allSegs)
-	return buf
+	return buf, byRank
 }
 
 // simplifyPolyline converts int32 coords to float32 points and skips

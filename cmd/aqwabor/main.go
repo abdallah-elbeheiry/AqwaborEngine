@@ -284,6 +284,7 @@ func runWorldDemo() {
 		scene, _ := sceneComp.Get(mapE)
 
 		rend.SetViewport(vp)
+		rend.SetZoom(cam.Zoom)
 		vpMat := render.ViewProjMap(*cam, float32(vp.Width), float32(vp.Height), scene.WorldScale)
 		gfx.SetCamera(vpMat, float32(vp.Width), float32(vp.Height))
 		gfx.Begin(dc, render.Clear{R: scene.ClearR, G: scene.ClearG, B: scene.ClearB, A: scene.ClearA})
