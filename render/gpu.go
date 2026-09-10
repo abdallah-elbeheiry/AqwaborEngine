@@ -142,10 +142,21 @@ func (g *GPU) DrawSprites(batch *SpriteBatch) {
 	g.r.DrawInstanced(batch.meshInternal(), batch.bufferInternal())
 }
 
+// DrawSpritesRange draws one range of a batch. A layer's buffer is divided into
+// chunks of world space, so a view is a few ranges of it rather than all of it.
+func (g *GPU) DrawSpritesRange(batch *SpriteBatch, first, count int) {
+	g.r.DrawInstancedRange(batch.meshInternal(), batch.bufferInternal(), first, count)
+}
+
 // Culled names a cull dispatch that has been encoded and is waiting to be
 // drawn. The zero value draws nothing.
+//
+// It holds the pipeline it was encoded against, not only the slot: a later cull
+// in the same frame can need a larger pipeline, and the draw has to read the
+// buffers its own dispatch wrote rather than the ones the replacement holds.
 type Culled struct {
 	mesh *Mesh
+	cull *CullPipeline
 	slot int
 	ok   bool
 }
@@ -163,8 +174,20 @@ type Culled struct {
 // takes its own region of the output buffer and its own draw command, so they
 // do not overwrite one another.
 func (g *GPU) CullSprites(batch *SpriteBatch, viewBounds ViewBounds) Culled {
+	return g.CullSpritesRange(batch, 0, batch.bufferInternal().Count(), viewBounds)
+}
+
+// CullSpritesRange is CullSprites over one range of the batch, which is what a
+// scene submits: only the chunks a view covers are worth testing per instance.
+func (g *GPU) CullSpritesRange(batch *SpriteBatch, first, count int, viewBounds ViewBounds) Culled {
 	instances := batch.bufferInternal()
-	if instances.Count() == 0 {
+	if first < 0 {
+		first = 0
+	}
+	if first+count > instances.Capacity() {
+		count = instances.Capacity() - first
+	}
+	if count <= 0 {
 		return Culled{}
 	}
 	if g.r.PassOpen() {
@@ -177,7 +200,15 @@ func (g *GPU) CullSprites(batch *SpriteBatch, viewBounds ViewBounds) Culled {
 		return Culled{}
 	}
 
-	g.ensureCull(instances.Count())
+	// The cull is the first thing to read the instance data this frame, so it
+	// is what has to upload it. The draws flush for themselves, but a culled
+	// draw reads the cull's output rather than this buffer, so on a frame with
+	// nothing but culled draws the writes never reached the GPU at all: the
+	// cull tested an empty buffer, every instance had zero scale, and nothing
+	// survived to be drawn.
+	instances.Flush(g.r.Queue())
+
+	g.ensureCull(count)
 	slot, ok := g.cull.Claim()
 	if !ok {
 		log.Error("this frame is out of cull slots; each culled draw needs one",
@@ -196,20 +227,20 @@ func (g *GPU) CullSprites(batch *SpriteBatch, viewBounds ViewBounds) Culled {
 		slot,
 		instances.Buffer(),
 		g.r.CameraBuffer(),
-		instances.Count(),
+		first, count,
 		[2]float32{viewBounds.MinX, viewBounds.MinY},
 		[2]float32{viewBounds.MaxX, viewBounds.MaxY},
 	)
-	return Culled{mesh: mesh, slot: slot, ok: true}
+	return Culled{mesh: mesh, cull: g.cull, slot: slot, ok: true}
 }
 
 // DrawSpritesCulled draws the survivors of a cull encoded earlier this frame.
 // It opens the render pass, so everything the cull needed is already recorded.
 func (g *GPU) DrawSpritesCulled(c Culled) {
-	if !c.ok {
+	if !c.ok || c.cull == nil {
 		return
 	}
-	g.r.DrawInstancedIndirect(c.mesh, g.cull, c.slot)
+	g.r.DrawInstancedIndirect(c.mesh, c.cull, c.slot)
 }
 
 // ensureCull creates or grows the cull pipeline. A pipeline replaced by a

@@ -190,6 +190,38 @@ func (r *Renderer) DrawInstanced(mesh *Mesh, instances *InstanceBuffer) {
 	r.stats.Triangles += int(mesh.IndexCount/3) * instances.Count()
 }
 
+// DrawInstancedRange submits an instanced draw over one range of the buffer.
+// The range is a run of chunks a view covers; the instances outside it are not
+// drawn and not culled, which is the work the chunking exists to skip.
+func (r *Renderer) DrawInstancedRange(mesh *Mesh, instances *InstanceBuffer, first, count int) {
+	if first < 0 {
+		first = 0
+	}
+	if first+count > instances.Capacity() {
+		count = instances.Capacity() - first
+	}
+	if count <= 0 {
+		return
+	}
+	if !r.ensurePass() {
+		return
+	}
+	instances.Flush(r.queue)
+
+	r.pass.SetPipeline(r.instPipe.Pipeline())
+	r.pass.SetBindGroup(0, r.cam.bg, nil)
+	r.pass.SetVertexBuffer(0, mesh.VertexBuffer, 0)
+	// The instance stream is bound at the range's first instance, so the draw
+	// needs no FirstInstance of its own.
+	r.pass.SetVertexBuffer(1, instances.Buffer(), uint64(first*instanceDataSize))
+	r.pass.SetIndexBuffer(mesh.IndexBuffer, gputypes.IndexFormatUint32, 0)
+	r.pass.DrawIndexed(mesh.IndexCount, uint32(count), 0, 0, 0)
+
+	r.stats.DrawCalls++
+	r.stats.Instances += count
+	r.stats.Triangles += int(mesh.IndexCount/3) * count
+}
+
 // DrawInstancedIndirect submits an indirect instanced draw over culled data.
 // The cull compute pass compacted survivors into this slot's region of the
 // output buffer, which is bound as the instance stream, and wrote the draw
