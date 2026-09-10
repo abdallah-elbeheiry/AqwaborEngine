@@ -261,7 +261,19 @@ func (r *Renderer) SubcellPipeline() *SubcellPipeline {
 
 // DrawSubcells submits the compact instanced draw for the cell layer.
 func (r *Renderer) DrawSubcells(cells *SubcellBuffer) {
-	if cells.Count() == 0 {
+	r.DrawSubcellsRange(cells, 0, cells.Count())
+}
+
+// DrawSubcellsRange submits one range of the cell layer. The range is a run of
+// chunks a view covers; the cells outside it are not drawn.
+func (r *Renderer) DrawSubcellsRange(cells *SubcellBuffer, first, count int) {
+	if first < 0 {
+		first = 0
+	}
+	if first+count > cells.Capacity() {
+		count = cells.Capacity() - first
+	}
+	if count <= 0 {
 		return
 	}
 	if !r.ensurePass() {
@@ -275,13 +287,15 @@ func (r *Renderer) DrawSubcells(cells *SubcellBuffer) {
 	r.pass.SetBindGroup(0, r.cam.bg, nil)
 	r.pass.SetBindGroup(1, p.ParamsBindGroup(), nil)
 	r.pass.SetVertexBuffer(0, mesh.VertexBuffer, 0)
-	r.pass.SetVertexBuffer(1, cells.Buffer(), 0)
+	// The instance stream is bound at the range's first cell, so the draw needs
+	// no FirstInstance of its own.
+	r.pass.SetVertexBuffer(1, cells.Buffer(), uint64(first*subcellInstanceSize))
 	r.pass.SetIndexBuffer(mesh.IndexBuffer, gputypes.IndexFormatUint32, 0)
-	r.pass.DrawIndexed(mesh.IndexCount, uint32(cells.Count()), 0, 0, 0)
+	r.pass.DrawIndexed(mesh.IndexCount, uint32(count), 0, 0, 0)
 
 	r.stats.DrawCalls++
-	r.stats.Instances += cells.Count()
-	r.stats.Triangles += int(mesh.IndexCount/3) * cells.Count()
+	r.stats.Instances += count
+	r.stats.Triangles += int(mesh.IndexCount/3) * count
 }
 
 // --- Stroke draws ---

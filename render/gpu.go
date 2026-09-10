@@ -329,6 +329,12 @@ func (g *GPU) SetCellSize(w, h float32) {
 // DrawSubcells draws the cell layer.
 func (g *GPU) DrawSubcells(cells *SubcellBuffer) { g.r.DrawSubcells(cells) }
 
+// DrawSubcellsRange draws one range of the cell layer, which is what a grid
+// submits: the chunks a view covers rather than the whole world.
+func (g *GPU) DrawSubcellsRange(cells *SubcellBuffer, first, count int) {
+	g.r.DrawSubcellsRange(cells, first, count)
+}
+
 // --- Strokes ---
 
 // DrawStrokes submits GPU-expanded stroke segments.

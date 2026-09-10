@@ -28,8 +28,8 @@ import (
 	"github.com/gogpu/gogpu"
 )
 
-// materials is how many colours the grid draws with.
-const materials = 16
+// palettes is how many colours the grid draws with.
+const palettes = 16
 
 func main() {
 	logx.Init(logx.WithColor(true), logx.WithLevel(logx.InfoLevel))
@@ -91,7 +91,8 @@ func main() {
 	win.OnUpdate(func(dt float64) { mgr.Update(dt) })
 
 	var gfx *render.GPU
-	var cells *render.SubcellBuffer
+	var cells *render.Cells
+	var materials []uint32
 	var ramp render.RampTable
 	var phase float32
 	var frame int
@@ -105,27 +106,23 @@ func main() {
 
 		if gfx == nil {
 			gfx = render.New(win.DeviceProvider())
+			setRamp(gfx, &ramp, 0)
 
 			// One cell per world unit, so the camera's zoom is pixels a cell
 			// and nothing converts between two scales.
-			gfx.SetCellSize(1, 1)
-			setRamp(gfx, &ramp, 0)
+			cells = render.NewCells(gfx, render.CellsConfig{
+				W: *side, H: *side, CellSize: 1,
+			})
 
-			// The grid is written once. From here the only thing that changes
-			// is the ramp, which is what makes a recolour cheap: a moving light
-			// becomes a change of index per cell, or of the table itself.
-			cells = gfx.Subcells(*side * *side)
-			grid := make([]render.SubcellInstance, 0, *side**side)
+			// The game's own dense array. The layer reads it and keeps nothing.
+			materials = make([]uint32, *side**side)
 			for y := range *side {
 				for x := range *side {
-					grid = append(grid, render.SubcellInstance{
-						X: float32(x) + 0.5, Y: float32(y) + 0.5,
-						Palette: render.PaletteOf((x/8 + y/8) % materials),
-					})
+					materials[y**side+x] = render.PaletteOf((x/8 + y/8) % palettes)
 				}
 			}
-			cells.WriteAll(grid)
-			logx.Info("grid built", "cells", len(grid), "bytes", len(grid)*16)
+			cells.TouchAll()
+			logx.Info("grid built", "cells", len(materials), "bytes", len(materials)*16)
 		}
 
 		if reroll {
@@ -134,18 +131,21 @@ func main() {
 			reroll = false
 		}
 
+		cells.Sync(materials)
+
 		c, _ := camComp.Get(camE)
 		if err := gfx.Begin(dc, render.Clear{R: 0.03, G: 0.03, B: 0.05, A: 1}); err != nil {
 			return
 		}
 		gfx.SetCamera(camera.ViewProj(*c, vpW, vpH), vpW, vpH)
-		gfx.DrawSubcells(cells)
+		cells.Draw(render.ViewOf(c.X, c.Y, c.Zoom, vpW, vpH))
 		gfx.End()
 
 		if time.Since(reported) > time.Second {
-			s := gfx.Stats()
-			logx.Info("frame", "cells", cells.Count(),
-				"draws", s.DrawCalls, "instances", s.Instances, "zoom", c.Zoom)
+			s := cells.Stats()
+			logx.Info("frame", "of", len(materials),
+				"written", s.Written, "submitted", s.Submitted, "draws", s.Draws,
+				"zoom", c.Zoom)
 			reported = time.Now()
 		}
 	})
@@ -157,8 +157,8 @@ func main() {
 // setRamp fills the palette. Materials are numbered from zero; a cell carries
 // PaletteOf(material), and a cell carrying zero draws nothing.
 func setRamp(gfx *render.GPU, table *render.RampTable, phase float32) {
-	for m := range materials {
-		h := float64(m)/materials + float64(phase)*0.1
+	for m := range palettes {
+		h := float64(m)/palettes + float64(phase)*0.1
 		table.Set(m,
 			float32(0.5+0.5*math.Sin(2*math.Pi*h)),
 			float32(0.5+0.5*math.Sin(2*math.Pi*(h+1.0/3))),
