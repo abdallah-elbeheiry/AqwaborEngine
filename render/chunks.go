@@ -73,16 +73,32 @@ type home struct {
 
 // grid is one layer's chunking. It maps entities to slots in the layer's
 // instance buffer and answers which ranges of that buffer a view can see.
+//
+// The buffer is an arena. A chunk that appears, or one that outgrows its range,
+// takes a new range off the end rather than pushing every range after it along.
+// Laying the whole layer out again writes every instance in it, and that is the
+// expensive thing: measured at 490,000 sprites, a relayout cost 560,000 writes,
+// 28-45 ms of sync and 8 ms of upload, and it was happening most seconds
+// because moving entities keep reaching chunks that do not exist yet.
 type grid struct {
 	size   float32
 	chunks []gridChunk
 	byKey  map[chunkKey]int
 	homes  map[ecs.Entity]home
 
-	// total is how many slots the layer's buffer holds, free ones included.
+	// total is how many slots the arena has handed out, holes included.
 	total int
-	// stale is set when the ranges no longer describe the buffer, which means
-	// every instance has to be written again rather than only what changed.
+	// wasted is slots inside ranges nothing points at any more, which is what
+	// a compaction reclaims.
+	wasted int
+
+	// moved names the chunks whose range has just moved. Their instances are
+	// somewhere else in the buffer now, so the caller writes those chunks
+	// again - a chunk's worth of writes, not a layer's.
+	moved []chunkKey
+
+	// stale asks for a compaction: the arena is more hole than data, so the
+	// layer is laid out again and every instance written.
 	stale bool
 }
 
@@ -96,6 +112,18 @@ func newGrid(size float32) *grid {
 		homes: make(map[ecs.Entity]home),
 	}
 }
+
+// alloc hands out a range of the arena.
+func (g *grid) alloc(n int) int {
+	start := g.total
+	g.total += n
+	return start
+}
+
+// compactAt is the share of the arena that may be holes before a compaction is
+// asked for. Half is a lot of buffer to carry, and a compaction is the only
+// thing that gives it back.
+const compactAt = 2
 
 func (g *grid) keyFor(x, y float32) chunkKey {
 	return chunkKey{CX: floorDiv(x, g.size), CY: floorDiv(y, g.size)}
@@ -145,18 +173,19 @@ func (g *grid) place(e ecs.Entity, x, y, w, h float32) (idx int, vacated int, fr
 	c := &g.chunks[ci]
 	slot, ok := c.free()
 	if !ok {
-		// Grow the way a slice does. A fixed step meant a chunk holding 256
-		// cells took a relayout - every instance in the layer written - each
-		// time one more entity wandered into it. Measured on the demo: 10,264
-		// instances written on such a frame against 64 on the others.
+		// Grow the way a slice does, and take the larger range off the end of
+		// the arena. The old range becomes a hole; what has to be written again
+		// is this chunk, not the layer.
 		by := max(slack, len(c.slots)/4)
 		slot = len(c.slots)
 		c.slots = append(c.slots, make([]ecs.Entity, by)...)
 		for i := slot; i < len(c.slots); i++ {
 			c.slots[i] = ecs.NoEntity
 		}
-		g.total += by
-		g.stale = true
+		g.wasted += slot
+		c.start = g.alloc(len(c.slots))
+		g.moved = append(g.moved, c.key)
+		g.checkCompaction()
 	}
 	c.slots[slot] = e
 	c.used++
@@ -177,6 +206,13 @@ func (g *grid) remove(e ecs.Entity) (int, bool) {
 	return idx, true
 }
 
+// takeChunk marks a chunk's whole range as a hole, which is what removing the
+// last entity in it leaves behind.
+func (g *grid) noteEmpty(c *gridChunk) {
+	g.wasted += len(c.slots)
+	g.checkCompaction()
+}
+
 func (g *grid) take(e ecs.Entity, h home) {
 	ci, ok := g.byKey[h.key]
 	if !ok {
@@ -186,6 +222,9 @@ func (g *grid) take(e ecs.Entity, h home) {
 	if h.slot < len(c.slots) && c.slots[h.slot] == e {
 		c.slots[h.slot] = ecs.NoEntity
 		c.used--
+		if c.used == 0 {
+			g.noteEmpty(c)
+		}
 	}
 	delete(g.homes, e)
 }
@@ -220,14 +259,23 @@ func (g *grid) chunkFor(key chunkKey) int {
 		c.slots[i] = ecs.NoEntity
 	}
 
+	c.start = g.alloc(slack)
+
 	g.chunks = append(g.chunks, gridChunk{})
 	copy(g.chunks[at+1:], g.chunks[at:])
 	g.chunks[at] = c
 
 	g.reindex()
-	g.total += slack
-	g.stale = true
 	return at
+}
+
+// checkCompaction asks for a relayout once the arena is carrying more hole than
+// data. Everything else grows the arena instead, because a relayout writes
+// every instance in the layer.
+func (g *grid) checkCompaction() {
+	if g.total > 0 && g.wasted*compactAt >= g.total {
+		g.stale = true
+	}
 }
 
 func before(a, b chunkKey) bool {
@@ -262,6 +310,8 @@ func (g *grid) relayout() {
 		at += len(g.chunks[i].slots)
 	}
 	g.total = at
+	g.wasted = 0
+	g.moved = g.moved[:0]
 	g.reindex()
 	g.stale = false
 }
@@ -297,13 +347,22 @@ func (g *grid) visible(v ViewBounds, max int) []instRange {
 		max = 1
 	}
 
-	var runs []instRange
+	var found []instRange
 	for i := range g.chunks {
 		c := &g.chunks[i]
 		if c.empty() || !overlaps(c, v) {
 			continue
 		}
-		r := instRange{First: c.start, Count: len(c.slots)}
+		found = append(found, instRange{First: c.start, Count: len(c.slots)})
+	}
+	// A chunk that appeared late sits at the end of the arena rather than in
+	// row order, so the ranges are sorted before they are merged. Without this
+	// two neighbouring chunks would be two draws whenever one of them was
+	// allocated after the other.
+	sort.Slice(found, func(i, j int) bool { return found[i].First < found[j].First })
+
+	var runs []instRange
+	for _, r := range found {
 		if n := len(runs); n > 0 && runs[n-1].First+runs[n-1].Count == r.First {
 			runs[n-1].Count += r.Count
 			continue

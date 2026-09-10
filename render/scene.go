@@ -178,11 +178,50 @@ func (s *Scene) Sync() {
 	}
 
 	for li, l := range s.layers {
-		if !l.grid.stale {
+		if l.grid.stale {
+			s.rebuild(li)
 			continue
 		}
-		s.rebuild(li)
+		if len(l.grid.moved) > 0 {
+			s.rewriteMoved(li)
+		}
 	}
+}
+
+// rewriteMoved writes the chunks whose range moved this Sync. A chunk that
+// outgrew its range took a new one off the end of the arena, so its instances
+// are somewhere else in the buffer now and the old range holds them still.
+//
+// This is the cheap half of what used to be a relayout: a chunk's worth of
+// writes rather than a layer's.
+func (s *Scene) rewriteMoved(li int) {
+	l := s.layers[li]
+	s.ensure(li)
+
+	for _, key := range l.grid.moved {
+		ci, ok := l.grid.byKey[key]
+		if !ok {
+			continue
+		}
+		c := &l.grid.chunks[ci]
+		for slot, e := range c.slots {
+			if e == ecs.NoEntity {
+				l.sink.Set(c.start+slot, InstanceData{})
+				s.stats.Written++
+				continue
+			}
+			t, okT := s.comps.Transform.Get(e)
+			sp, okS := s.comps.Sprite.Get(e)
+			if !okT || !okS {
+				l.sink.Set(c.start+slot, InstanceData{})
+				s.stats.Written++
+				continue
+			}
+			l.sink.Set(c.start+slot, s.instance(e, *t, *sp))
+			s.stats.Written++
+		}
+	}
+	l.grid.moved = l.grid.moved[:0]
 }
 
 // sweepOne checks one chunk for entities that have been destroyed, and takes

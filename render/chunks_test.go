@@ -20,11 +20,81 @@ func TestGridKeepsSlackForMembershipChanges(t *testing.T) {
 	if g.stale {
 		t.Fatal("a relayout left the grid stale")
 	}
+}
 
-	// One more than the slack grows the chunk, which is what a relayout is for.
-	g.place(ecs.Entity(slack+1), 1, 1, 1, 1)
+func TestGridGrowthMovesOneChunkNotTheLayer(t *testing.T) {
+	g := newGrid(32)
+
+	// Two chunks, the first one full.
+	for i := range slack {
+		g.place(ecs.Entity(i+1), 1, 1, 1, 1)
+	}
+	g.place(100, 40, 1, 1, 1)
+	g.relayout()
+
+	far, _ := g.indexOf(100)
+
+	// One more into the full chunk: it outgrows its range.
+	g.place(200, 2, 2, 1, 1)
+
+	if g.stale {
+		t.Fatal("growing a chunk asked for a relayout; it should take a new range instead")
+	}
+	if len(g.moved) != 1 {
+		t.Fatalf("moved = %v, want the one chunk that grew", g.moved)
+	}
+	if got, _ := g.indexOf(100); got != far {
+		t.Fatalf("the other chunk moved to %d from %d; only the chunk that grew may move", got, far)
+	}
+	if got, _ := g.indexOf(1); got < far {
+		t.Fatal("the grown chunk did not take a range off the end of the arena")
+	}
+}
+
+func TestGridNewChunkDoesNotRelayout(t *testing.T) {
+	g := newGrid(32)
+
+	g.place(1, 1, 1, 1, 1)
+	g.relayout()
+	first, _ := g.indexOf(1)
+
+	// A chunk that sorts before the existing one, so a row-ordered layout
+	// would have had to move the existing range.
+	g.place(2, -40, -40, 1, 1)
+
+	if g.stale {
+		t.Fatal("a new chunk asked for a relayout")
+	}
+	if got, _ := g.indexOf(1); got != first {
+		t.Fatalf("the existing chunk moved to %d from %d", got, first)
+	}
+	if got, _ := g.indexOf(2); got != slack {
+		t.Fatalf("the new chunk starts at %d, want %d: off the end of the arena", got, slack)
+	}
+}
+
+func TestGridCompactsWhenMostlyHoles(t *testing.T) {
+	g := newGrid(32)
+
+	// Fill one chunk and grow it repeatedly, which leaves the ranges it left
+	// behind as holes.
+	for i := range slack * 4 {
+		g.place(ecs.Entity(i+1), 1, 1, 1, 1)
+		if g.stale {
+			break
+		}
+	}
+
 	if !g.stale {
-		t.Fatal("growing a chunk past its slack did not mark the grid stale")
+		t.Fatalf("the arena is %d slots with %d wasted and no compaction was asked for", g.total, g.wasted)
+	}
+
+	g.relayout()
+	if g.wasted != 0 || g.stale {
+		t.Fatalf("after a compaction: wasted = %d, stale = %v, want 0 and false", g.wasted, g.stale)
+	}
+	if g.total != len(g.chunks[0].slots) {
+		t.Fatalf("the compacted arena is %d slots for a chunk of %d", g.total, len(g.chunks[0].slots))
 	}
 }
 
