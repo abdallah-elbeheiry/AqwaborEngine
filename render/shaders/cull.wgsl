@@ -24,6 +24,10 @@ struct CullParams {
     // Several culls share one buffer, each compacting from its own base, so a
     // second cull in a frame no longer overwrites the first.
     outputBase:    u32,
+    // inputBase is the first instance this cull reads. A layer's buffer is
+    // divided into chunks of world space and only the chunks a view covers are
+    // culled, so a cull covers a range of the buffer rather than all of it.
+    inputBase:     u32,
     minBounds:     vec2<f32>,
     maxBounds:     vec2<f32>,
 };
@@ -119,7 +123,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let i = id.x;
     if (i >= cullParams.instanceCount) { return; }
 
-    let inst = inputInstances[i];
+    let inst = inputInstances[cullParams.inputBase + i];
 
     // Skip inactive (zero scale)
     if (inst.scale.x <= 0.0 && inst.scale.y <= 0.0) {

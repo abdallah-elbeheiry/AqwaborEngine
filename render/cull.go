@@ -39,11 +39,18 @@ type CullParams struct {
 	// The shader compacts survivors from there rather than from zero, which is
 	// what lets several culls share one buffer.
 	OutputBase uint32
-	MinBounds  [2]float32
-	MaxBounds  [2]float32
+	// InputBase is the first instance the cull reads, so a cull can cover one
+	// range of a layer's buffer rather than the whole of it.
+	InputBase uint32
+	_         uint32 // pad: the vec2 fields align to 8 in WGSL
+	MinBounds [2]float32
+	MaxBounds [2]float32
 }
 
-const cullParamsSize = 24
+const cullParamsSize = 32
+
+var _ [cullParamsSize - unsafe.Sizeof(CullParams{})]byte
+var _ [unsafe.Sizeof(CullParams{}) - cullParamsSize]byte
 
 // CullPipeline manages GPU compute culling and indirect draw support.
 //
@@ -213,12 +220,13 @@ func (cp *CullPipeline) EncodeDispatch(
 	slot int,
 	inputBuf *wgpu.Buffer,
 	cameraBuf *wgpu.Buffer,
-	instanceCount int,
+	firstInstance, instanceCount int,
 	minBounds, maxBounds [2]float32,
 ) {
 	params := CullParams{
 		InstanceCount: uint32(instanceCount),
 		OutputBase:    uint32(slot * cp.maxInstances),
+		InputBase:     uint32(firstInstance),
 		MinBounds:     minBounds,
 		MaxBounds:     maxBounds,
 	}

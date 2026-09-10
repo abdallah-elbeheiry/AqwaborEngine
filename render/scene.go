@@ -1,52 +1,396 @@
 package render
 
-// GeometryType describes the shape of a renderable entity.
-type GeometryType uint8
-
-const (
-	GeometryPolygon GeometryType = iota
-	GeometryPolyline
-	GeometrySprite
+import (
+	"github.com/abdallah-elbeheiry/AqwaborEngine/ecs"
 )
 
-// Geometry holds raw vertex data for a renderable shape.
-// For polygons and polylines, Coords is interleaved x,y int32 pairs.
-// The int32 format preserves precision for large world-space coordinates
-// (e.g. degrees × scale).
-type Geometry struct {
-	Type   GeometryType
-	Coords []int32
-	Closed bool // polylines only: whether to close the loop
+// Scene draws what a world holds. It is the layer between the ECS and the GPU:
+// a game spawns entities and writes components, and nothing it touches names a
+// buffer, a pipeline or a bind group.
+//
+// The shape is one instance buffer per layer, divided into chunks of world
+// space (see chunks.go). An entity that has not moved is not written and not
+// walked; a view is the handful of buffer ranges its chunks cover; and what
+// those ranges hold is handed to the GPU cull, which drops the instances that
+// are inside a visible chunk but outside the view. Coarse on the CPU, fine on
+// the GPU, and never per entity in Go.
+//
+// What has changed is told, not discovered. Spawn records it, Touch records it
+// for anything the game moves, and Sync is what turns those into writes. A
+// still world costs nothing per frame, which is the whole point.
+type Scene struct {
+	gfx   *GPU
+	world *ecs.World
+	comps Components
+
+	layers  []*sceneLayer
+	layerOf map[ecs.Entity]int
+	dirty   *ecs.Set
+
+	cullFrom int
+	maxRuns  int
+	stats    SceneStats
 }
 
-// Appearance holds the visual style of a renderable entity.
-// A negative RGB value means "no fill" or "no stroke" respectively.
-type Appearance struct {
-	FillR, FillG, FillB, FillA         float32
-	StrokeR, StrokeG, StrokeB, StrokeA float32
-	StrokeWidthPx                      float32
-	MinSegmentPx                       float32
+// SceneConfig is what a scene needs to know that it cannot work out.
+type SceneConfig struct {
+	// ChunkSize is the side of a chunk in world units. Too small and a view
+	// covers many chunks; too large and a chunk is redrawn for one moving
+	// entity. Defaults to 64.
+	ChunkSize float32
+
+	// Layers is how many draw buckets there are. An entity's bucket is its
+	// Sprite.Layer, clamped. Defaults to 1.
+	Layers int
+
+	// CullFrom is the instance count from which a range is worth culling on
+	// the GPU rather than drawn as it stands. Defaults to 64. A number larger
+	// than the world turns the GPU cull off and leaves the chunking.
+	CullFrom int
+
+	// MaxRuns is how many ranges a layer may draw in a frame. Runs past it are
+	// joined, which draws the gap between them as well. Defaults to the cull's
+	// slot count, which is what bounds it in practice. One run means the whole
+	// layer in a single draw.
+	MaxRuns int
 }
 
-// HasFill reports whether this appearance has a fill colour.
-func (a Appearance) HasFill() bool { return a.FillA >= 0 }
-
-// HasStroke reports whether this appearance has a stroke colour.
-func (a Appearance) HasStroke() bool { return a.StrokeA >= 0 }
-
-// Renderable is a marker component that ties an entity to its geometry and
-// appearance for the render system. GeometryIndex indexes into the scene's
-// geometry slice; Rank controls LOD; Order controls draw ordering within a
-// pass.
-type Renderable struct {
-	GeometryIndex int
-	Rank          int
-	Order         float32
+// SceneStats is what the last frame did, which is what a change to the scene is
+// argued with.
+type SceneStats struct {
+	// Written is instances rewritten by the last Sync, which is the number a
+	// still world drives to zero.
+	Written int
+	// Rebuilt is layers laid out again by the last Sync, which is the
+	// expensive case: every instance in the layer written.
+	Rebuilt int
+	// Submitted is instances the last Draw covered, before the GPU cull.
+	Submitted int
+	// Draws is draw calls the last Draw issued.
+	Draws int
 }
 
-// Bounds is an axis-aligned bounding box in int32 world-space coordinates.
-type Bounds struct {
-	MinX, MinY, MaxX, MaxY int32
+type sceneLayer struct {
+	grid  *grid
+	batch *SpriteBatch
+	// sweep is the chunk liveness is checked in next. One chunk a Sync, so a
+	// game that destroys without dropping still gets its slots back, at a cost
+	// that does not grow with the world.
+	sweep int
+	// sink is what instances are written to. It is the batch in a running
+	// game; naming it separately is what lets the packing be tested without a
+	// GPU, which is most of what this file decides.
+	sink    instanceSink
+	scratch []InstanceData
+}
+
+// instanceSink is the writing half of a sprite batch.
+type instanceSink interface {
+	Set(index int, inst InstanceData)
+	SetAll(insts []InstanceData)
+}
+
+// NewScene builds the scene for a world. The component handles are the ones
+// RegisterECS returned; a scene reads through them and registers nothing of its
+// own.
+func NewScene(gfx *GPU, w *ecs.World, comps Components, cfg SceneConfig) *Scene {
+	if cfg.Layers < 1 {
+		cfg.Layers = 1
+	}
+	if cfg.CullFrom <= 0 {
+		cfg.CullFrom = 64
+	}
+	if cfg.MaxRuns <= 0 {
+		cfg.MaxRuns = cullSlots
+	}
+
+	s := &Scene{
+		gfx:      gfx,
+		world:    w,
+		comps:    comps,
+		layerOf:  make(map[ecs.Entity]int),
+		dirty:    w.NewSet(),
+		cullFrom: cfg.CullFrom,
+		maxRuns:  cfg.MaxRuns,
+	}
+	for range cfg.Layers {
+		s.layers = append(s.layers, &sceneLayer{grid: newGrid(cfg.ChunkSize)})
+	}
+	return s
+}
+
+// Spawn creates a drawable entity and records that it has to be written.
+//
+// It exists because setting a component does not wake it, so an entity spawned
+// by hand is in no set the scene walks and is never drawn. That was found from
+// the outside: the first game on this engine fell back to visiting every row
+// because of it.
+func (s *Scene) Spawn(t Transform, c Color, sp Sprite) ecs.Entity {
+	e := s.world.Create()
+	s.comps.Transform.Set(e, t)
+	s.comps.Color.Set(e, c)
+	s.comps.Sprite.Set(e, sp)
+	s.dirty.Add(e)
+	return e
+}
+
+// Touch records that an entity's Transform, Color or Sprite has changed and its
+// instance has to be written again. Moving something without it draws the old
+// position, because a scene is told what changed rather than looking for it.
+func (s *Scene) Touch(e ecs.Entity) { s.dirty.Add(e) }
+
+// Drop takes an entity out of the scene. Its slot is blanked rather than
+// reclaimed, so dropping is a write and not a relayout.
+//
+// Call it before destroying an entity. A destroyed entity cannot be Touched -
+// an ecs.Set refuses a handle whose generation has moved on - so the scene has
+// no way of being told after the fact. What it has instead is the sweep, which
+// finds a dead entity within a bounded number of frames; Drop is what makes it
+// immediate.
+func (s *Scene) Drop(e ecs.Entity) {
+	li, ok := s.layerOf[e]
+	if !ok {
+		return
+	}
+	if idx, had := s.layers[li].grid.remove(e); had && s.layers[li].sink != nil {
+		s.layers[li].sink.Set(idx, InstanceData{})
+		s.stats.Written++
+	}
+	delete(s.layerOf, e)
+	s.dirty.Remove(e)
+}
+
+// Sync writes what changed into the layer buffers. It reads Transform, Sprite
+// and Color and writes nothing back, so a Schedule can declare it as
+// Reads(transform, sprite, color) and run it beside anything that does not
+// write them.
+func (s *Scene) Sync() {
+	s.stats.Written = 0
+	s.stats.Rebuilt = 0
+
+	s.dirty.Each(func(e ecs.Entity) {
+		s.sync(e)
+	})
+	s.dirty.Clear()
+
+	for li := range s.layers {
+		s.sweepOne(li)
+	}
+
+	for li, l := range s.layers {
+		if !l.grid.stale {
+			continue
+		}
+		s.rebuild(li)
+	}
+}
+
+// sweepOne checks one chunk for entities that have been destroyed, and takes
+// them out. Destroying without dropping is the case it covers: the entity is
+// gone, its handle can no longer be added to a set, and its instance would
+// otherwise keep being drawn until something else moved the layout.
+func (s *Scene) sweepOne(li int) {
+	l := s.layers[li]
+	if len(l.grid.chunks) == 0 {
+		return
+	}
+	if l.sweep >= len(l.grid.chunks) {
+		l.sweep = 0
+	}
+	c := &l.grid.chunks[l.sweep]
+	l.sweep++
+
+	for _, e := range c.slots {
+		if e == ecs.NoEntity || s.world.Alive(e) {
+			continue
+		}
+		s.Drop(e)
+	}
+}
+
+func (s *Scene) sync(e ecs.Entity) {
+	if !s.world.Alive(e) {
+		s.Drop(e)
+		return
+	}
+	t, ok := s.comps.Transform.Get(e)
+	if !ok {
+		s.Drop(e)
+		return
+	}
+	sp, ok := s.comps.Sprite.Get(e)
+	if !ok {
+		s.Drop(e)
+		return
+	}
+
+	li := s.layerFor(*sp)
+	if was, ok := s.layerOf[e]; ok && was != li {
+		if idx, had := s.layers[was].grid.remove(e); had {
+			s.layers[was].sink.Set(idx, InstanceData{})
+			s.stats.Written++
+		}
+	}
+	s.layerOf[e] = li
+
+	l := s.layers[li]
+	sx, sy := scaleOf(*t)
+	idx := l.grid.place(e, t.X, t.Y, sx, sy)
+	s.ensure(li)
+	l.sink.Set(idx, s.instance(e, *t, *sp))
+	s.stats.Written++
+}
+
+// rebuild writes a whole layer again, which is what a grid whose ranges moved
+// needs. It is the case worth avoiding, and Rebuilt in the stats is how a game
+// sees it happening.
+func (s *Scene) rebuild(li int) {
+	l := s.layers[li]
+	l.grid.relayout()
+	s.ensure(li)
+
+	if cap(l.scratch) < l.grid.total {
+		l.scratch = make([]InstanceData, l.grid.total)
+	}
+	l.scratch = l.scratch[:l.grid.total]
+	clear(l.scratch)
+
+	for ci := range l.grid.chunks {
+		c := &l.grid.chunks[ci]
+		for slot, e := range c.slots {
+			if e == ecs.NoEntity {
+				continue
+			}
+			t, ok := s.comps.Transform.Get(e)
+			if !ok {
+				continue
+			}
+			sp, ok := s.comps.Sprite.Get(e)
+			if !ok {
+				continue
+			}
+			l.scratch[c.start+slot] = s.instance(e, *t, *sp)
+		}
+	}
+
+	l.sink.SetAll(l.scratch)
+	s.stats.Written += len(l.scratch)
+	s.stats.Rebuilt++
+}
+
+// Draw submits the layers in order, through the camera already set on the GPU.
+//
+// It follows the frame's two phases on its own: every cull it needs is encoded
+// before the first draw opens the render pass. Call it between Begin and End.
+func (s *Scene) Draw(view ViewBounds) {
+	s.stats.Submitted = 0
+	s.stats.Draws = 0
+
+	type submission struct {
+		layer  int
+		culled Culled
+		direct instRange
+	}
+
+	slots := min(cullSlots, s.maxRuns)
+	var plan []submission
+
+	for li, l := range s.layers {
+		if l.batch == nil || l.grid.total == 0 {
+			continue
+		}
+		for _, r := range l.grid.visible(view, s.maxRuns) {
+			s.stats.Submitted += r.Count
+			if r.Count >= s.cullFrom && slots > 0 {
+				c := s.gfx.CullSpritesRange(l.batch, r.First, r.Count, view)
+				if c.ok {
+					slots--
+					plan = append(plan, submission{layer: li, culled: c})
+					continue
+				}
+			}
+			plan = append(plan, submission{layer: li, direct: r})
+		}
+	}
+
+	for _, p := range plan {
+		if p.culled.ok {
+			s.gfx.DrawSpritesCulled(p.culled)
+		} else {
+			s.gfx.DrawSpritesRange(s.layers[p.layer].batch, p.direct.First, p.direct.Count)
+		}
+		s.stats.Draws++
+	}
+}
+
+// Stats is what the last Sync and Draw did.
+func (s *Scene) Stats() SceneStats { return s.stats }
+
+// GPU is the facade the scene draws through, for the frame around it: Begin,
+// SetCamera and End are the caller's, because a frame may hold more than one
+// scene.
+func (s *Scene) GPU() *GPU { return s.gfx }
+
+// Release frees the layer buffers.
+func (s *Scene) Release() {
+	for _, l := range s.layers {
+		if l.batch != nil {
+			l.batch.Release()
+			l.batch = nil
+		}
+	}
+}
+
+func (s *Scene) layerFor(sp Sprite) int {
+	li := int(sp.Layer)
+	if li < 0 {
+		return 0
+	}
+	if li >= len(s.layers) {
+		return len(s.layers) - 1
+	}
+	return li
+}
+
+// ensure makes sure the layer has a batch large enough for its grid. Writing
+// past a batch grows it, so this is about the first write rather than every
+// one.
+func (s *Scene) ensure(li int) {
+	l := s.layers[li]
+	if l.sink != nil {
+		return
+	}
+	l.batch = s.gfx.Sprites(max(l.grid.total, 64))
+	l.sink = l.batch
+}
+
+func (s *Scene) instance(e ecs.Entity, t Transform, sp Sprite) InstanceData {
+	col := Color{R: 1, G: 1, B: 1, A: 1}
+	if c, ok := s.comps.Color.Get(e); ok {
+		col = *c
+	}
+	sx, sy := scaleOf(t)
+	return InstanceData{
+		Position: [2]float32{t.X, t.Y},
+		Scale:    [2]float32{sx, sy},
+		Rotation: t.Rot,
+		Color:    [4]float32{col.R, col.G, col.B, col.A},
+		UVOffset: [2]float32{sp.UVX, sp.UVY},
+		Layer:    sp.Layer,
+	}
+}
+
+// scaleOf reads a transform's size, treating a zero scale as one rather than as
+// nothing: a spawn that sets a position and no size means a unit sprite.
+func scaleOf(t Transform) (float32, float32) {
+	sx, sy := t.SX, t.SY
+	if sx == 0 {
+		sx = 1
+	}
+	if sy == 0 {
+		sy = 1
+	}
+	return sx, sy
 }
 
 // Clamp255 clamps a float32 in [0,1] to a uint32 in [0,255].

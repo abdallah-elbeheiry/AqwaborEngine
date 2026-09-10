@@ -20,8 +20,11 @@ func TestCullParamsLayout(t *testing.T) {
 	}{
 		{"InstanceCount", uintptr(unsafe.Pointer(&p.InstanceCount)) - base, 0},
 		{"OutputBase", uintptr(unsafe.Pointer(&p.OutputBase)) - base, 4},
-		{"MinBounds", uintptr(unsafe.Pointer(&p.MinBounds)) - base, 8},
-		{"MaxBounds", uintptr(unsafe.Pointer(&p.MaxBounds)) - base, 16},
+		{"InputBase", uintptr(unsafe.Pointer(&p.InputBase)) - base, 8},
+		// Three u32s end at 12 and a vec2 aligns to 8, so WGSL puts the bounds
+		// at 16 and 24 with a pad between. The Go struct carries that pad.
+		{"MinBounds", uintptr(unsafe.Pointer(&p.MinBounds)) - base, 16},
+		{"MaxBounds", uintptr(unsafe.Pointer(&p.MaxBounds)) - base, 24},
 	} {
 		if c.off != c.want {
 			t.Errorf("%s at %d, want %d; the shader reads it there", c.name, c.off, c.want)
