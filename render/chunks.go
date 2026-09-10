@@ -20,6 +20,12 @@ import (
 // handful of ranges rather than a range per chunk, which is what keeps the draw
 // count inside the cull's slots.
 //
+// It is one file because it is one idea. The arena, the slots, the holes and
+// the compaction share invariants that only make sense read together: a slot
+// index means nothing without the chunk's start, and the start means nothing
+// without knowing what a relayout is allowed to move. None of it is reachable
+// from game code.
+//
 // Nothing here touches the GPU, so all of it is tested without a device.
 
 // slack is how many spare slots a chunk keeps. Membership changes inside the

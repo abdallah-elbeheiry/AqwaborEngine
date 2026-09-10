@@ -78,14 +78,23 @@ type sceneLayer struct {
 	// game that destroys without dropping still gets its slots back, at a cost
 	// that does not grow with the world.
 	sweep int
-	// sink is what instances are written to. It is the batch in a running
-	// game; naming it separately is what lets the packing be tested without a
-	// GPU, which is most of what this file decides.
+	// sink is what instances are written to: the layer's batch in a running
+	// game, and a recorder in the tests.
 	sink    instanceSink
 	scratch []InstanceData
 }
 
-// instanceSink is the writing half of a sprite batch.
+// instanceSink is the writing half of a sprite batch, and it exists for the
+// tests rather than for game code.
+//
+// It is unexported and there is no way to supply one from outside the package:
+// a scene always writes to the batch it made. What it buys is that the part of
+// this file worth checking - which slot an entity lands in, what a chunk that
+// moved rewrites, that a vacated slot is blanked - is checked without a GPU, so
+// sixteen tests run anywhere rather than needing a device and a window.
+//
+// If you are reading this to work out how to draw something: you do not need
+// it. Spawn, wake, Sync, Draw.
 type instanceSink interface {
 	Set(index int, inst InstanceData)
 	SetAll(insts []InstanceData)
