@@ -109,9 +109,30 @@ func main() {
 	var lastReportFrame int
 	var reported time.Time
 	var syncMs, drawMs, presentMs float64
-	last := time.Now()
 
 	win.OnResize(func(w, h int) { logx.Info("resized", "w", w, "h", h) })
+
+	// Input and movement run whether or not a frame is drawn. On an OnDemand
+	// window the loop wakes on an OS event, ticks this, and only draws if this
+	// asked it to.
+	win.OnUpdate(func(dt float64) {
+		mgr.Update(dt)
+
+		if scene == nil || len(moving) == 0 {
+			return
+		}
+		t := float64(frame) / 60
+		for i, e := range moving {
+			tr, ok := comps.Transform.Get(e)
+			if !ok {
+				continue
+			}
+			tr.X += float32(math.Cos(t+float64(i)) * 0.6)
+			tr.Y += float32(math.Sin(t+float64(i)) * 0.6)
+			comps.Transform.Wake(e)
+		}
+		win.RequestRedraw()
+	})
 
 	err = win.Run(func(dc *gogpu.Context) {
 		if w, h := dc.Size(); w > 0 && h > 0 {
@@ -119,9 +140,6 @@ func main() {
 		}
 		win.WatchScale(dc.ScaleFactor())
 
-		now := time.Now()
-		mgr.Update(now.Sub(last).Seconds())
-		last = now
 		frame++
 
 		if scene == nil {
@@ -165,18 +183,6 @@ func main() {
 			}
 		}
 
-		// Move a few sprites and say so. Everything else is never written
-		// again, which is what the frame's numbers should show.
-		t := float64(frame) / 60
-		for i, e := range moving {
-			tr, ok := comps.Transform.Get(e)
-			if !ok {
-				continue
-			}
-			tr.X += float32(math.Cos(t+float64(i)) * 0.6)
-			tr.Y += float32(math.Sin(t+float64(i)) * 0.6)
-			comps.Transform.Wake(e)
-		}
 		syncStart := time.Now()
 		scene.Sync()
 		syncMs = time.Since(syncStart).Seconds() * 1000

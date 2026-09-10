@@ -164,6 +164,23 @@ func (w *Window) Run(onDraw func(dc *gogpu.Context)) error {
 	return err
 }
 
+// OnUpdate registers the tick that runs whether or not a frame is drawn: input,
+// simulation, anything that decides there is something new to show.
+//
+// It matters on an OnDemand window. The loop blocks on OS events when idle,
+// wakes on one, and calls this; OnDraw runs only if something asked for a
+// frame. Polling input from the draw callback instead leaves an idle window
+// deaf, because no frame means no polling and no polling means nothing ever
+// asks for a frame.
+//
+// GPU work belongs in the draw callback, not here.
+func (w *Window) OnUpdate(fn func(dt float64)) {
+	if w.app == nil || fn == nil {
+		return
+	}
+	w.app.OnUpdate(fn)
+}
+
 // RequestRedraw asks for one frame. It is what drives an OnDemand window, and
 // it is harmless on a continuous one.
 func (w *Window) RequestRedraw() {
