@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/abdallah-elbeheiry/AqwaborEngine/mapdata"
+	"github.com/abdallah-elbeheiry/AqwaborEngine/examples/mapdata"
 )
 
 func TestTriangulateSquare(t *testing.T) {
