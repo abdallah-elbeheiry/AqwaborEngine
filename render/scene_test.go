@@ -231,3 +231,38 @@ func TestSceneZeroScaleMeansOne(t *testing.T) {
 		t.Fatalf("position = %v, want 3,4", got.Position)
 	}
 }
+
+func TestSceneCrossingAChunkLeavesNoGhost(t *testing.T) {
+	s, _, recs := sceneForTest(t, SceneConfig{ChunkSize: 32})
+
+	// Both chunks already exist and both keep a resident, so the move creates
+	// no chunk and forces no relayout. A relayout rewrites the whole layer and
+	// would erase the evidence.
+	s.Spawn(Transform{X: 2, Y: 2, SX: 1, SY: 1}, Color{A: 1}, Sprite{})
+	s.Spawn(Transform{X: 34, Y: 2, SX: 1, SY: 1}, Color{A: 1}, Sprite{})
+	e := s.Spawn(Transform{X: 10, Y: 10, SX: 5, SY: 5}, Color{A: 1}, Sprite{})
+	s.Sync()
+
+	was, _ := s.layers[0].grid.indexOf(e)
+	if s.Stats().Rebuilt != 0 {
+		// The first Sync always lays the layer out; from here on it must not.
+		s.Sync()
+	}
+
+	tr, _ := s.comps.Transform.Get(e)
+	tr.X = 40 // into the chunk next door, which already exists
+	s.Touch(e)
+	s.Sync()
+
+	if got := s.Stats().Rebuilt; got != 0 {
+		t.Fatalf("the move caused %d relayouts, so this proves nothing", got)
+	}
+	now, _ := s.layers[0].grid.indexOf(e)
+	if now == was {
+		t.Fatal("the entity did not change slot, so this proves nothing")
+	}
+	if got := recs[0].entries[was]; got.Scale != [2]float32{0, 0} {
+		t.Fatalf("the slot it left still draws it: scale %v at %v; the sprite stays frozen where it was",
+			got.Scale, got.Position)
+	}
+}

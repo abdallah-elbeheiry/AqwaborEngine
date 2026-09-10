@@ -235,8 +235,15 @@ func (s *Scene) sync(e ecs.Entity) {
 
 	l := s.layers[li]
 	sx, sy := scaleOf(*t)
-	idx := l.grid.place(e, t.X, t.Y, sx, sy)
+	idx, vacated, freed := l.grid.place(e, t.X, t.Y, sx, sy)
 	s.ensure(li)
+	if freed {
+		// The slot it left still holds the instance written there, and a free
+		// slot nothing claims keeps drawing it: the sprite would stay frozen
+		// where it was.
+		l.sink.Set(vacated, InstanceData{})
+		s.stats.Written++
+	}
 	l.sink.Set(idx, s.instance(e, *t, *sp))
 	s.stats.Written++
 }

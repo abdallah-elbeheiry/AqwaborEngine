@@ -114,20 +114,29 @@ func floorDiv(v, size float32) int32 {
 }
 
 // place puts an entity at the position given and returns the slot in the
-// layer's instance buffer that holds it.
+// layer's instance buffer that holds it, plus the slot it vacated if crossing a
+// chunk boundary moved it.
+//
+// The vacated slot has to be blanked by the caller. The grid knows it is free;
+// the buffer still holds the instance last written there, and a free slot that
+// is never claimed keeps drawing that instance - the entity appears frozen at
+// the position it left, which is what this used to do.
 //
 // An entity that has not moved out of its chunk keeps its slot, which is what
 // makes a moving entity cost one instance write. Crossing a chunk boundary
 // costs a slot in the new chunk, and only running out of slack costs a
 // relayout.
-func (g *grid) place(e ecs.Entity, x, y, w, h float32) int {
+func (g *grid) place(e ecs.Entity, x, y, w, h float32) (idx int, vacated int, freed bool) {
 	key := g.keyFor(x, y)
 
 	if prev, ok := g.homes[e]; ok {
 		if prev.key == key {
 			c := &g.chunks[g.byKey[key]]
 			c.cover(x, y, w, h)
-			return c.start + prev.slot
+			return c.start + prev.slot, 0, false
+		}
+		if ci, ok := g.byKey[prev.key]; ok {
+			vacated, freed = g.chunks[ci].start+prev.slot, true
 		}
 		g.take(e, prev)
 	}
@@ -153,7 +162,7 @@ func (g *grid) place(e ecs.Entity, x, y, w, h float32) int {
 	c.used++
 	c.cover(x, y, w, h)
 	g.homes[e] = home{key: key, slot: slot}
-	return c.start + slot
+	return c.start + slot, vacated, freed
 }
 
 // remove takes an entity out of the grid. Its slot stays as a free one, so a
