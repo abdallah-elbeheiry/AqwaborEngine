@@ -60,6 +60,9 @@ func (sb *SpriteBatch) Release() {
 		sb.mesh = nil
 	}
 	if sb.buf != nil {
-		sb.buf = nil // InstanceBuffer has no Release; GPU owns the device
+		// The buffer owns GPU memory: the live allocation plus anything growth
+		// retired. Dropping the reference without releasing leaked both.
+		sb.buf.Release()
+		sb.buf = nil
 	}
 }
