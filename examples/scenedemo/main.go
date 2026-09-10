@@ -12,6 +12,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"math"
 	"time"
 
@@ -55,6 +56,10 @@ func main() {
 	comps := render.MustRegisterECS(w)
 	camComp := camera.MustRegisterECS(w)
 
+	// The viewport is read from the frame, not remembered from the window that
+	// was asked for. Moving a window to a display with a different backing
+	// scale resizes the surface, and a projection built for the old size draws
+	// the scene into a corner of the new one.
 	vpW, vpH := float32(1280), float32(720)
 	camE := w.Create()
 	camComp.Set(camE, camera.Camera{Zoom: float32(*zoom), MinZoom: 0.05, MaxZoom: 50, Active: 1})
@@ -103,7 +108,14 @@ func main() {
 	var syncMs, drawMs, presentMs float64
 	last := time.Now()
 
+	win.OnResize(func(w, h int) { logx.Info("resized", "w", w, "h", h) })
+
 	err = win.Run(func(dc *gogpu.Context) {
+		if w, h := dc.Size(); w > 0 && h > 0 {
+			vpW, vpH = float32(w), float32(h)
+		}
+		win.WatchScale(dc.ScaleFactor())
+
 		now := time.Now()
 		mgr.Update(now.Sub(last).Seconds())
 		last = now
@@ -172,6 +184,16 @@ func main() {
 		}
 
 		if since := time.Since(reported); since > time.Second {
+			cw, ch := dc.Size()
+			fw, fh := dc.FramebufferSize()
+			ww, wh := win.Size()
+			logx.Info("viewport",
+				"ctx", fmt.Sprintf("%dx%d", cw, ch),
+				"ctxFramebuffer", fmt.Sprintf("%dx%d", fw, fh),
+				"window", fmt.Sprintf("%dx%d", ww, wh),
+				"scale", dc.ScaleFactor(),
+				"aspect", dc.AspectRatio())
+
 			s := scene.Stats()
 			logx.Info("frame",
 				"fps", float64(frame-lastReportFrame)/since.Seconds(),
