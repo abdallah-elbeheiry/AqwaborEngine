@@ -220,41 +220,90 @@ func (ib *instanceBufferOf[T]) WriteAt(start int, src []T) {
 	ib.dirtyRanges = append(ib.dirtyRanges, [2]int{start, end})
 }
 
-// Flush uploads all dirty ranges to the GPU buffer.
-// Must be called once per frame before drawing (DrawInstanced does this
-// automatically). Callers using WriteAll/WriteAt already emit clean ranges;
-// this merge is a safety net for mixed sparse+dense patterns in one frame.
+// gapMerge is how far apart two dirty ranges may be and still be uploaded as
+// one, in instances.
+//
+// Both sides of the trade were measured on an M4 Max. A WriteBuffer call costs
+// about 1.5 us: 2,000 of them for 2,000 moved instances took 3 ms of a frame.
+// The bus does about 10 GB/s: one 31 MB upload also took 3 ms. So merging
+// across a gap pays whenever
+//
+//	gap * 64 bytes / 10 GB/s  <  1.5 us
+//
+// which is a gap of about 234 instances. Half of that is comfortably profitable
+// rather than marginal, and it bounds the bytes a merge can waste.
+//
+// This is a floor, not a cure. Dirty instances that are already next to each
+// other cost 0.9 ms where the same number scattered cost 3.4 ms, and no
+// threshold closes that: keeping what moves together in the buffer does.
+const gapMerge = 128
+
+// maxUploads is how many uploads one flush may issue whatever the ranges look
+// like. Past it the closest pairs are joined until it fits, which sends more
+// bytes and fewer commands.
+const maxUploads = 16
+
+// uploadPlan turns dirty ranges into the ranges actually uploaded: sorted,
+// merged where they touch or nearly touch, and joined until there are few
+// enough calls. It never returns less than what was dirty, so the plan is
+// always safe - the CPU copy is authoritative, and sending a clean instance
+// again changes nothing.
+//
+// It is separate from Flush because this is the decision worth testing, and it
+// needs no device to make.
+func uploadPlan(ranges [][2]int) [][2]int {
+	merged := mergeRanges(ranges)
+	if len(merged) < 2 {
+		return merged
+	}
+
+	// Join neighbours that are close enough that another call costs more than
+	// the gap between them.
+	out := merged[:1]
+	for _, r := range merged[1:] {
+		last := &out[len(out)-1]
+		if r[0]-last[1] <= gapMerge {
+			if r[1] > last[1] {
+				last[1] = r[1]
+			}
+			continue
+		}
+		out = append(out, r)
+	}
+
+	// Still too many calls: join the closest pair until it fits.
+	for len(out) > maxUploads {
+		best, bestGap := 0, -1
+		for i := 0; i+1 < len(out); i++ {
+			gap := out[i+1][0] - out[i][1]
+			if bestGap < 0 || gap < bestGap {
+				best, bestGap = i, gap
+			}
+		}
+		out[best][1] = out[best+1][1]
+		out = append(out[:best+1], out[best+2:]...)
+	}
+	return out
+}
+
+// Flush uploads the dirty ranges to the GPU buffer.
+// Must be called once per frame before drawing; DrawInstanced and the cull do
+// it for themselves, so a caller rarely needs to.
 func (ib *instanceBufferOf[T]) Flush(queue *wgpu.Queue) {
 	if len(ib.dirtyRanges) == 0 {
 		return
 	}
 
-	merged := mergeRanges(ib.dirtyRanges)
-
-	// When many small ranges span most of the buffer, collapse to one upload.
-	if len(merged) > 8 {
-		minStart, maxEnd, dirty := merged[0][0], merged[0][1], 0
-		for _, r := range merged {
-			if r[0] < minStart {
-				minStart = r[0]
-			}
-			if r[1] > maxEnd {
-				maxEnd = r[1]
-			}
-			dirty += r[1] - r[0]
-		}
-		span := maxEnd - minStart
-		if span > 0 && dirty*2 >= span {
-			merged = [][2]int{{minStart, maxEnd}}
-		}
-	}
-
-	for _, r := range merged {
+	for _, r := range uploadPlan(ib.dirtyRanges) {
 		start, end := r[0], r[1]
+		if end > len(ib.cpuData) {
+			end = len(ib.cpuData)
+		}
+		if start >= end {
+			continue
+		}
 		byteStart := uint64(start * ib.stride)
 		byteSize := uint64((end - start) * ib.stride)
-
-		// Upload the dirty range from CPU data
 		src := unsafe.Slice((*byte)(unsafe.Pointer(&ib.cpuData[start])), int(byteSize))
 		queue.WriteBuffer(ib.buffer, byteStart, src)
 	}

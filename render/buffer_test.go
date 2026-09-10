@@ -92,3 +92,60 @@ func TestInstanceStrideMatchesTheStruct(t *testing.T) {
 		t.Fatalf("InstanceData is %d bytes, the constant says %d", got, instanceDataSize)
 	}
 }
+
+// The plan is what decides how many uploads a frame costs, and it is the
+// decision worth pinning: a call is expensive, the bytes in a gap are not.
+func TestUploadPlanMergesAcrossSmallGaps(t *testing.T) {
+	plan := uploadPlan([][2]int{{0, 1}, {gapMerge, gapMerge + 1}})
+	if len(plan) != 1 {
+		t.Fatalf("plan = %v, want one upload: the gap is inside the threshold", plan)
+	}
+	if plan[0] != [2]int{0, gapMerge + 1} {
+		t.Fatalf("merged range = %v, want the span of both", plan[0])
+	}
+
+	far := uploadPlan([][2]int{{0, 1}, {gapMerge * 4, gapMerge*4 + 1}})
+	if len(far) != 2 {
+		t.Fatalf("plan = %v, want two uploads: the gap is wider than the threshold", far)
+	}
+}
+
+func TestUploadPlanBoundsTheCallCount(t *testing.T) {
+	// A thousand single instances, spread far enough apart that nothing merges
+	// on distance alone. This is the moving-entity case: 2,000 of these cost
+	// 2 ms a frame as separate uploads.
+	var ranges [][2]int
+	for i := range 1000 {
+		at := i * gapMerge * 4
+		ranges = append(ranges, [2]int{at, at + 1})
+	}
+
+	plan := uploadPlan(ranges)
+	if len(plan) > maxUploads {
+		t.Fatalf("plan issues %d uploads, want at most %d", len(plan), maxUploads)
+	}
+
+	// Every dirty instance still has to be inside some uploaded range.
+	for _, want := range ranges {
+		covered := false
+		for _, r := range plan {
+			if want[0] >= r[0] && want[1] <= r[1] {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			t.Fatalf("instance %v is dirty and in no upload", want)
+		}
+	}
+}
+
+func TestUploadPlanKeepsOneRangeAlone(t *testing.T) {
+	plan := uploadPlan([][2]int{{5, 9}})
+	if len(plan) != 1 || plan[0] != [2]int{5, 9} {
+		t.Fatalf("plan = %v, want the range unchanged", plan)
+	}
+	if got := uploadPlan(nil); len(got) != 0 {
+		t.Fatalf("plan for nothing dirty = %v, want none", got)
+	}
+}
