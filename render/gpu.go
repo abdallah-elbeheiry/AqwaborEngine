@@ -209,10 +209,15 @@ func (g *GPU) CullSpritesRange(batch *SpriteBatch, first, count int, viewBounds 
 	instances.Flush(g.r.Queue())
 
 	g.ensureCull(count)
-	slot, ok := g.cull.Claim()
+	if g.cull == nil {
+		return Culled{}
+	}
+	slot, ok := g.cull.Claim(count)
 	if !ok {
-		log.Error("this frame is out of cull slots; each culled draw needs one",
-			"slots", cullSlots)
+		// Out of slots, or out of room in the output buffer. Either way the
+		// caller draws the range without culling rather than not at all.
+		log.Debug("no cull this draw; the range is drawn as it stands",
+			"slots", cullSlots, "instances", count)
 		return Culled{}
 	}
 
@@ -243,18 +248,35 @@ func (g *GPU) DrawSpritesCulled(c Culled) {
 	g.r.DrawInstancedIndirect(c.mesh, c.cull, c.slot)
 }
 
-// ensureCull creates or grows the cull pipeline. A pipeline replaced by a
-// larger one is retired rather than released, because a frame already submitted
-// may still be reading its buffers.
+// ensureCull creates or grows the cull pipeline so this frame's culls fit in
+// its output buffer. A pipeline replaced by a larger one is retired rather than
+// released, because a frame already submitted may still be reading its buffers.
+//
+// The buffer holds the frame's total, not its largest cull times the slot
+// count, so growing is driven by what the frame has already claimed.
 func (g *GPU) ensureCull(count int) {
-	if g.cull != nil && g.cullMax >= count {
+	if g.cull != nil && g.cull.Fits(count) {
 		return
 	}
+	want := count
+	if g.cull != nil {
+		want += g.cull.used
+	}
+	if want > maxCullBytes/instanceDataSize {
+		// It cannot be made to fit. Keep whatever pipeline there is; the claim
+		// that follows fails and the range is drawn uncalled.
+		return
+	}
+
 	if g.cull != nil {
 		g.retired = append(g.retired, retiredCull{cull: g.cull, frame: g.frame})
 	}
-	maxN := max(count, 1024)
+	maxN := max(want*2, 1024)
 	g.cull = NewCullPipeline(g.r.Device(), g.r.Queue(), maxN)
+	if g.cull == nil {
+		g.cullMax = 0
+		return
+	}
 	g.cull.BeginFrame()
 	g.cullMax = maxN
 }

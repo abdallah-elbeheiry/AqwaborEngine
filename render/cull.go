@@ -52,6 +52,13 @@ const cullParamsSize = 32
 var _ [cullParamsSize - unsafe.Sizeof(CullParams{})]byte
 var _ [unsafe.Sizeof(CullParams{}) - cullParamsSize]byte
 
+// maxCullBytes is the largest output buffer a cull pipeline will ask for. The
+// WebGPU guaranteed minimum for a storage binding is 128 MiB and RADV reports
+// 256 MiB; asking past what the device allows used to panic out of the frame
+// callback with "size 274200576 exceeds maximum 268435456". A cull that does
+// not fit is refused, and the caller draws the range uncalled instead.
+const maxCullBytes = 128 << 20
+
 // CullPipeline manages GPU compute culling and indirect draw support.
 //
 // Ordering contract: the compute pass that writes outputBuf/indirectBuf must
@@ -69,6 +76,15 @@ type CullPipeline struct {
 	outputBuf    *wgpu.Buffer
 	paramsBuf    *wgpu.Buffer
 	maxInstances int
+
+	// used is how much of the output buffer this frame has claimed. Slots take
+	// what they need from it in order rather than each owning a region as large
+	// as the biggest cull: the buffer is the frame's total, not eight times its
+	// largest. Sized the old way, a single run covering 535,548 instances asked
+	// for 261 MB and the device refused it.
+	used int
+	// base is where each slot's survivors start, in instances.
+	base [cullSlots]int
 
 	// Cached bind group: rebuilt only when the input or camera buffer
 	// identity changes (avoids a CreateBindGroup per dispatch).
@@ -93,6 +109,11 @@ func NewCullPipeline(dev *wgpu.Device, queue *wgpu.Queue, maxInstances int) *Cul
 	if queue == nil {
 		queue = dev.Queue()
 	}
+	if fits := maxCullBytes / instanceDataSize; maxInstances > fits {
+		log.Warn("the cull is capped at what a storage buffer holds; larger draws go uncalled",
+			"asked", maxInstances, "capped", fits)
+		maxInstances = fits
+	}
 	cp := &CullPipeline{dev: dev, queue: queue, maxInstances: maxInstances}
 
 	shader, err := dev.CreateShaderModule(&wgpu.ShaderModuleDescriptor{
@@ -100,7 +121,9 @@ func NewCullPipeline(dev *wgpu.Device, queue *wgpu.Queue, maxInstances int) *Cul
 		WGSL:  cullWGSL,
 	})
 	if err != nil {
-		panic(err)
+		log.Error("the cull pipeline could not be built; culled draws are off", "err", err)
+		cp.Release()
+		return nil
 	}
 	defer shader.Release()
 
@@ -110,16 +133,21 @@ func NewCullPipeline(dev *wgpu.Device, queue *wgpu.Queue, maxInstances int) *Cul
 		Usage: gputypes.BufferUsageIndirect | gputypes.BufferUsageStorage | gputypes.BufferUsageCopyDst,
 	})
 	if err != nil {
-		panic(err)
+		log.Error("the cull pipeline could not be built; culled draws are off", "err", err)
+		cp.Release()
+		return nil
 	}
 
 	cp.outputBuf, err = dev.CreateBuffer(&wgpu.BufferDescriptor{
 		Label: "cull output",
-		Size:  uint64(maxInstances * instanceDataSize * cullSlots),
+		Size:  uint64(maxInstances * instanceDataSize),
 		Usage: gputypes.BufferUsageVertex | gputypes.BufferUsageStorage | gputypes.BufferUsageCopyDst,
 	})
 	if err != nil {
-		panic(err)
+		log.Error("the cull's output buffer was refused; culled draws are off until it fits",
+			"instances", maxInstances, "bytes", maxInstances*instanceDataSize, "err", err)
+		cp.Release()
+		return nil
 	}
 
 	cp.paramsBuf, err = dev.CreateBuffer(&wgpu.BufferDescriptor{
@@ -128,7 +156,9 @@ func NewCullPipeline(dev *wgpu.Device, queue *wgpu.Queue, maxInstances int) *Cul
 		Usage: gputypes.BufferUsageUniform | gputypes.BufferUsageCopyDst,
 	})
 	if err != nil {
-		panic(err)
+		log.Error("the cull pipeline could not be built; culled draws are off", "err", err)
+		cp.Release()
+		return nil
 	}
 
 	cp.bgl, err = dev.CreateBindGroupLayout(&wgpu.BindGroupLayoutDescriptor{
@@ -147,7 +177,9 @@ func NewCullPipeline(dev *wgpu.Device, queue *wgpu.Queue, maxInstances int) *Cul
 		},
 	})
 	if err != nil {
-		panic(err)
+		log.Error("the cull pipeline could not be built; culled draws are off", "err", err)
+		cp.Release()
+		return nil
 	}
 
 	cp.pl, err = dev.CreatePipelineLayout(&wgpu.PipelineLayoutDescriptor{
@@ -155,7 +187,9 @@ func NewCullPipeline(dev *wgpu.Device, queue *wgpu.Queue, maxInstances int) *Cul
 		BindGroupLayouts: []*wgpu.BindGroupLayout{cp.bgl},
 	})
 	if err != nil {
-		panic(err)
+		log.Error("the cull pipeline could not be built; culled draws are off", "err", err)
+		cp.Release()
+		return nil
 	}
 
 	cp.pipe, err = dev.CreateComputePipeline(&wgpu.ComputePipelineDescriptor{
@@ -165,26 +199,36 @@ func NewCullPipeline(dev *wgpu.Device, queue *wgpu.Queue, maxInstances int) *Cul
 		EntryPoint: "main",
 	})
 	if err != nil {
-		panic(err)
+		log.Error("the cull pipeline could not be built; culled draws are off", "err", err)
+		cp.Release()
+		return nil
 	}
 
 	return cp
 }
 
+// Fits reports whether n more instances can be culled this frame.
+func (cp *CullPipeline) Fits(n int) bool { return cp.used+n <= cp.maxInstances }
+
 // BeginFrame returns the pipeline to its first slot. Call once a frame, before
 // any cull.
-func (cp *CullPipeline) BeginFrame() { cp.next = 0 }
+func (cp *CullPipeline) BeginFrame() { cp.next, cp.used = 0, 0 }
 
 // SlotsLeft is how many culled draws remain available this frame.
 func (cp *CullPipeline) SlotsLeft() int { return cullSlots - cp.next }
 
 // Claim reserves the next slot, reporting false when the frame is out of them.
-func (cp *CullPipeline) Claim() (int, bool) {
-	if cp.next >= cullSlots {
+// Claim takes a slot and the room in the output buffer for n survivors. The
+// room is taken in order, so what the buffer has to hold is the frame's total
+// rather than its largest cull times the slot count.
+func (cp *CullPipeline) Claim(n int) (int, bool) {
+	if cp.next >= cullSlots || cp.used+n > cp.maxInstances {
 		return 0, false
 	}
 	s := cp.next
 	cp.next++
+	cp.base[s] = cp.used
+	cp.used += n
 	return s, true
 }
 
@@ -206,7 +250,7 @@ func (cp *CullPipeline) ResetIndirect(slot int, indexCount uint32) {
 // OutputOffset is the byte offset of a slot's region in the output buffer,
 // which is what the draw binds the instance stream at.
 func (cp *CullPipeline) OutputOffset(slot int) uint64 {
-	return uint64(slot) * uint64(cp.maxInstances) * instanceDataSize
+	return uint64(cp.base[slot]) * instanceDataSize
 }
 
 // IndirectOffset is the byte offset of a slot's draw command.
@@ -225,7 +269,7 @@ func (cp *CullPipeline) EncodeDispatch(
 ) {
 	params := CullParams{
 		InstanceCount: uint32(instanceCount),
-		OutputBase:    uint32(slot * cp.maxInstances),
+		OutputBase:    uint32(cp.base[slot]),
 		InputBase:     uint32(firstInstance),
 		MinBounds:     minBounds,
 		MaxBounds:     maxBounds,
