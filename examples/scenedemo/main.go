@@ -38,6 +38,7 @@ func main() {
 	side := flag.Int("side", 100, "sprites a side; the field is this squared")
 	movers := flag.Int("movers", 64, "how many of them move every frame")
 	chunk := flag.Float64("chunk", 64, "chunk side in world units")
+	onDemand := flag.Bool("ondemand", false, "draw only when something changes; -movers 0 with this is an idle world")
 	spread := flag.Bool("spread", true, "spread the movers over the field; false puts them together")
 	flag.Parse()
 
@@ -46,6 +47,7 @@ func main() {
 		W:         1280,
 		H:         720,
 		Resizable: true,
+		OnDemand:  *onDemand,
 	})
 	if err != nil {
 		logx.Fatalf("window: %v", err)
@@ -74,6 +76,7 @@ func main() {
 		a.OnPressed(func(input.Context) {
 			if c, ok := camComp.Get(camE); ok {
 				fn(c)
+				win.RequestRedraw()
 			}
 		})
 	}
@@ -177,6 +180,13 @@ func main() {
 		syncStart := time.Now()
 		scene.Sync()
 		syncMs = time.Since(syncStart).Seconds() * 1000
+
+		// A frame that would be identical is not worth drawing. On an OnDemand
+		// window this is what makes a still world cost nothing: nothing was
+		// written, so nothing asks for the next frame.
+		if scene.Stats().Written > 0 {
+			win.RequestRedraw()
+		}
 
 		c, _ := camComp.Get(camE)
 		if err := gfxBegin(dc, scene, c, vpW, vpH, &drawMs, &presentMs); err != nil {

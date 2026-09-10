@@ -13,6 +13,14 @@ type WindowConfig struct {
 	Title     string
 	W, H      int
 	Resizable bool
+
+	// OnDemand draws only when a redraw is asked for, rather than every
+	// vsync. A game whose world is still then costs nothing: the frame that
+	// would have been identical is never drawn and never presented, which is
+	// where an idle window's GPU time goes.
+	//
+	// Wake something, move the camera, take an input - call RequestRedraw.
+	OnDemand bool
 }
 
 // Window wraps gogpu App on auto mode (GraphicsAPIAuto, RenderModeAuto).
@@ -39,8 +47,9 @@ func NewWindow(cfg WindowConfig) (*Window, error) {
 		WithTitle(cfg.Title).
 		WithSize(cfg.W, cfg.H).
 		WithResizable(cfg.Resizable).
-		WithContinuousRender(true))
-	log.Debug("window created", "title", cfg.Title, "w", cfg.W, "h", cfg.H, "resizable", cfg.Resizable)
+		WithContinuousRender(!cfg.OnDemand))
+	log.Debug("window created", "title", cfg.Title, "w", cfg.W, "h", cfg.H,
+		"resizable", cfg.Resizable, "onDemand", cfg.OnDemand)
 	return &Window{app: app, cfg: cfg}, nil
 }
 
@@ -153,6 +162,14 @@ func (w *Window) Run(onDraw func(dc *gogpu.Context)) error {
 		log.Debug("window run loop exited cleanly")
 	}
 	return err
+}
+
+// RequestRedraw asks for one frame. It is what drives an OnDemand window, and
+// it is harmless on a continuous one.
+func (w *Window) RequestRedraw() {
+	if w.app != nil {
+		w.app.RequestRedraw()
+	}
 }
 
 func (w *Window) Close() {
