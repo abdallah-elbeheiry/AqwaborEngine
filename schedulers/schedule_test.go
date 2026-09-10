@@ -160,7 +160,11 @@ func TestBarrierRunsBetweenStages(t *testing.T) {
 // expensive one is split once it has been measured.
 func TestCheapStageStaysSerial(t *testing.T) {
 	s := NewSchedule()
-	s.SetParallelFloor(time.Millisecond)
+	// A floor no measurement can cross, so the test is about the decision and
+	// not about how long a sleep really takes. With a floor of a millisecond
+	// and work that sleeps, a loaded machine measures the sleep at more than
+	// the floor and the stage is split - correctly, and the test failed for it.
+	s.SetParallelFloor(time.Hour)
 
 	var concurrent atomic.Int64
 	var maxConcurrent atomic.Int64
