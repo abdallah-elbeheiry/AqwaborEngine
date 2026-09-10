@@ -20,25 +20,23 @@ var strokeFragWGSL string
 //
 // Bindings:
 //
-//	group(0) binding(0) = Camera uniform (viewProj + viewport)
+//	group(0) binding(0) = the engine's shared camera uniform (viewProj + viewport)
 //	slot(0)            = quad vertex buffer (4 corners, 8 bytes each)
 //	slot(1)            = segment instance buffer (StrokeSegment, 48 bytes)
 //	index buffer       = quad indices (6 x uint16)
 type StrokePipeline struct {
-	pipe      *wgpu.RenderPipeline
-	bgl       *wgpu.BindGroupLayout
-	pl        *wgpu.PipelineLayout
-	cameraBuf *wgpu.Buffer
-	bindGroup *wgpu.BindGroup
-	format    gputypes.TextureFormat
+	pipe   *wgpu.RenderPipeline
+	pl     *wgpu.PipelineLayout
+	format gputypes.TextureFormat
 
 	// Quad mesh (unit quad, index-buffered as 2 triangles).
 	quadVerts *wgpu.Buffer
 	quadIdx   *wgpu.Buffer
 }
 
-// NewStrokePipeline creates the stroke render pipeline.
-func NewStrokePipeline(dev *wgpu.Device, format gputypes.TextureFormat) *StrokePipeline {
+// NewStrokePipeline creates the stroke render pipeline against the engine's
+// shared camera layout.
+func NewStrokePipeline(dev *wgpu.Device, format gputypes.TextureFormat, camBGL *wgpu.BindGroupLayout) *StrokePipeline {
 	sp := &StrokePipeline{format: format}
 
 	vertMod, err := dev.CreateShaderModule(&wgpu.ShaderModuleDescriptor{
@@ -59,47 +57,9 @@ func NewStrokePipeline(dev *wgpu.Device, format gputypes.TextureFormat) *StrokeP
 	}
 	defer fragMod.Release()
 
-	// Camera uniform buffer
-	sp.cameraBuf, err = dev.CreateBuffer(&wgpu.BufferDescriptor{
-		Label: "stroke camera",
-		Size:  CameraUniformSize,
-		Usage: gputypes.BufferUsageUniform | gputypes.BufferUsageCopyDst,
-	})
-	if err != nil {
-		panic(err)
-	}
-
-	// Bind group layout: binding 0 = camera uniform (vertex stage)
-	sp.bgl, err = dev.CreateBindGroupLayout(&wgpu.BindGroupLayoutDescriptor{
-		Label: "stroke bgl",
-		Entries: []gputypes.BindGroupLayoutEntry{
-			{
-				Binding:    0,
-				Visibility: gputypes.ShaderStageVertex,
-				Buffer: &gputypes.BufferBindingLayout{
-					Type: gputypes.BufferBindingTypeUniform,
-				},
-			},
-		},
-	})
-	if err != nil {
-		panic(err)
-	}
-
 	sp.pl, err = dev.CreatePipelineLayout(&wgpu.PipelineLayoutDescriptor{
 		Label:            "stroke pll",
-		BindGroupLayouts: []*wgpu.BindGroupLayout{sp.bgl},
-	})
-	if err != nil {
-		panic(err)
-	}
-
-	sp.bindGroup, err = dev.CreateBindGroup(&wgpu.BindGroupDescriptor{
-		Label:  "stroke bg",
-		Layout: sp.bgl,
-		Entries: []wgpu.BindGroupEntry{
-			{Binding: 0, Buffer: sp.cameraBuf, Size: CameraUniformSize},
-		},
+		BindGroupLayouts: []*wgpu.BindGroupLayout{camBGL},
 	})
 	if err != nil {
 		panic(err)
@@ -172,24 +132,8 @@ func NewStrokePipeline(dev *wgpu.Device, format gputypes.TextureFormat) *StrokeP
 	return sp
 }
 
-// UpdateCamera writes the camera view-projection matrix and viewport to the GPU.
-func (sp *StrokePipeline) UpdateCamera(queue *wgpu.Queue, viewProj [16]float32, viewportW, viewportH float32) {
-	u := CameraUniform{
-		ViewProj: viewProj,
-		Viewport: [2]float32{viewportW, viewportH},
-	}
-	src := unsafe.Slice((*byte)(unsafe.Pointer(&u)), CameraUniformSize)
-	queue.WriteBuffer(sp.cameraBuf, 0, src)
-}
-
 // Pipeline returns the underlying render pipeline.
 func (sp *StrokePipeline) Pipeline() *wgpu.RenderPipeline { return sp.pipe }
-
-// BindGroup returns the camera bind group.
-func (sp *StrokePipeline) BindGroup() *wgpu.BindGroup { return sp.bindGroup }
-
-// CameraBuffer returns the camera uniform buffer (for sharing with compute cull).
-func (sp *StrokePipeline) CameraBuffer() *wgpu.Buffer { return sp.cameraBuf }
 
 // QuadVertexBuffer returns the unit quad vertex buffer (4 corners, 8 bytes each).
 func (sp *StrokePipeline) QuadVertexBuffer() *wgpu.Buffer { return sp.quadVerts }
@@ -202,17 +146,8 @@ func (sp *StrokePipeline) Release() {
 	if sp.pipe != nil {
 		sp.pipe.Release()
 	}
-	if sp.bgl != nil {
-		sp.bgl.Release()
-	}
 	if sp.pl != nil {
 		sp.pl.Release()
-	}
-	if sp.cameraBuf != nil {
-		sp.cameraBuf.Release()
-	}
-	if sp.bindGroup != nil {
-		sp.bindGroup.Release()
 	}
 	if sp.quadVerts != nil {
 		sp.quadVerts.Release()

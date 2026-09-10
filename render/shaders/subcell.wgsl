@@ -19,8 +19,8 @@ struct Cell {
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
-@group(0) @binding(1) var<uniform> ramp:   Ramp;
-@group(0) @binding(2) var<uniform> cell:   Cell;
+@group(1) @binding(0) var<uniform> ramp:   Ramp;
+@group(1) @binding(1) var<uniform> cell:   Cell;
 
 struct VSIn {
     @location(0) pos: vec2<f32>,

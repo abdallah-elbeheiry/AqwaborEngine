@@ -62,13 +62,13 @@ type RampTable struct {
 
 const rampTableSize = RampEntries * 16
 
-// SubcellPipeline draws the compact instances. It shares the camera uniform
-// shape with the sprite pipeline and adds the ramp table and the cell size.
+// SubcellPipeline draws the compact instances. The camera is the engine's, at
+// group 0; what this pipeline owns is the ramp table and the cell size, which
+// sit at group 1 because group 0 belongs to the engine.
 type SubcellPipeline struct {
 	pipe      *wgpu.RenderPipeline
 	bgl       *wgpu.BindGroupLayout
 	pl        *wgpu.PipelineLayout
-	cameraBuf *wgpu.Buffer
 	rampBuf   *wgpu.Buffer
 	cellBuf   *wgpu.Buffer
 	bindGroup *wgpu.BindGroup
@@ -88,8 +88,9 @@ const cellUniformSize = 16
 //go:embed shaders/subcell.wgsl
 var subcellVertWGSL string
 
-// NewSubcellPipeline builds the compact instanced pipeline.
-func NewSubcellPipeline(dev *wgpu.Device, queue *wgpu.Queue, format gputypes.TextureFormat) *SubcellPipeline {
+// NewSubcellPipeline builds the compact instanced pipeline against the engine's
+// shared camera layout.
+func NewSubcellPipeline(dev *wgpu.Device, queue *wgpu.Queue, format gputypes.TextureFormat, camBGL *wgpu.BindGroupLayout) *SubcellPipeline {
 	p := &SubcellPipeline{format: format}
 
 	vertMod, err := dev.CreateShaderModule(&wgpu.ShaderModuleDescriptor{Label: "subcell vert", WGSL: subcellVertWGSL})
@@ -112,7 +113,6 @@ func NewSubcellPipeline(dev *wgpu.Device, queue *wgpu.Queue, format gputypes.Tex
 		return b
 	}
 	uniform := gputypes.BufferUsageUniform | gputypes.BufferUsageCopyDst
-	p.cameraBuf = newBuf("subcell camera", CameraUniformSize, uniform)
 	p.rampBuf = newBuf("ramp table", rampTableSize, uniform)
 	p.cellBuf = newBuf("cell size", cellUniformSize, uniform)
 
@@ -124,8 +124,8 @@ func NewSubcellPipeline(dev *wgpu.Device, queue *wgpu.Queue, format gputypes.Tex
 		}
 	}
 	p.bgl, err = dev.CreateBindGroupLayout(&wgpu.BindGroupLayoutDescriptor{
-		Label:   "subcell bgl",
-		Entries: []gputypes.BindGroupLayoutEntry{entry(0), entry(1), entry(2)},
+		Label:   "subcell params bgl",
+		Entries: []gputypes.BindGroupLayoutEntry{entry(0), entry(1)},
 	})
 	if err != nil {
 		panic(err)
@@ -133,19 +133,18 @@ func NewSubcellPipeline(dev *wgpu.Device, queue *wgpu.Queue, format gputypes.Tex
 
 	p.pl, err = dev.CreatePipelineLayout(&wgpu.PipelineLayoutDescriptor{
 		Label:            "subcell pll",
-		BindGroupLayouts: []*wgpu.BindGroupLayout{p.bgl},
+		BindGroupLayouts: []*wgpu.BindGroupLayout{camBGL, p.bgl},
 	})
 	if err != nil {
 		panic(err)
 	}
 
 	p.bindGroup, err = dev.CreateBindGroup(&wgpu.BindGroupDescriptor{
-		Label:  "subcell bg",
+		Label:  "subcell params bg",
 		Layout: p.bgl,
 		Entries: []wgpu.BindGroupEntry{
-			{Binding: 0, Buffer: p.cameraBuf, Size: CameraUniformSize},
-			{Binding: 1, Buffer: p.rampBuf, Size: rampTableSize},
-			{Binding: 2, Buffer: p.cellBuf, Size: cellUniformSize},
+			{Binding: 0, Buffer: p.rampBuf, Size: rampTableSize},
+			{Binding: 1, Buffer: p.cellBuf, Size: cellUniformSize},
 		},
 	})
 	if err != nil {
@@ -195,20 +194,17 @@ func (p *SubcellPipeline) SetCellSize(queue *wgpu.Queue, w, h float32) {
 	queue.WriteBuffer(p.cellBuf, 0, src)
 }
 
-// UpdateCamera writes the view-projection and viewport.
-func (p *SubcellPipeline) UpdateCamera(queue *wgpu.Queue, viewProj [16]float32, viewportW, viewportH float32) {
-	u := CameraUniform{ViewProj: viewProj, Viewport: [2]float32{viewportW, viewportH}}
-	src := unsafe.Slice((*byte)(unsafe.Pointer(&u)), CameraUniformSize)
-	queue.WriteBuffer(p.cameraBuf, 0, src)
-}
-
 func (p *SubcellPipeline) Pipeline() *wgpu.RenderPipeline { return p.pipe }
-func (p *SubcellPipeline) BindGroup() *wgpu.BindGroup     { return p.bindGroup }
-func (p *SubcellPipeline) Mesh() *Mesh                    { return p.mesh }
+
+// ParamsBindGroup is the pipeline's own bindings - the ramp table and the cell
+// size - which the draw sets at group 1.
+func (p *SubcellPipeline) ParamsBindGroup() *wgpu.BindGroup { return p.bindGroup }
+
+func (p *SubcellPipeline) Mesh() *Mesh { return p.mesh }
 
 // Release frees the pipeline's GPU resources.
 func (p *SubcellPipeline) Release() {
-	for _, r := range []interface{ Release() }{p.pipe, p.bgl, p.pl, p.cameraBuf, p.rampBuf, p.cellBuf, p.bindGroup} {
+	for _, r := range []interface{ Release() }{p.pipe, p.bgl, p.pl, p.rampBuf, p.cellBuf, p.bindGroup} {
 		if r != nil {
 			r.Release()
 		}

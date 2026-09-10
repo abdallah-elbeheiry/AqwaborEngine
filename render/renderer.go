@@ -36,6 +36,10 @@ type Renderer struct {
 	clear      gputypes.Color
 	clearFirst bool
 
+	// cam is the one camera uniform every pipeline draws through, bound at
+	// group 0. A pipeline's own bindings start at group 1.
+	cam *cameraGroup
+
 	instPipe    *Pipeline        // instanced draws
 	strokePipe  *StrokePipeline  // screen-space-width polylines
 	subcellPipe *SubcellPipeline // compact palette-indexed cells (created on demand)
@@ -62,11 +66,14 @@ func NewRenderer(dp DeviceProvider) *Renderer {
 		format: format,
 	}
 
+	// The camera comes first: every pipeline is built against its layout.
+	r.cam = newCameraGroup(dev)
+
 	// Instanced pipeline
-	r.instPipe = NewPipeline(dev, format)
+	r.instPipe = NewPipeline(dev, format, r.cam.bgl)
 
 	// Stroke pipeline (screen-space-width polylines)
-	r.strokePipe = NewStrokePipeline(dev, format)
+	r.strokePipe = NewStrokePipeline(dev, format, r.cam.bgl)
 
 	return r
 }
@@ -172,7 +179,7 @@ func (r *Renderer) DrawInstanced(mesh *Mesh, instances *InstanceBuffer) {
 	instances.Flush(r.queue)
 
 	r.pass.SetPipeline(r.instPipe.Pipeline())
-	r.pass.SetBindGroup(0, r.instPipe.BindGroup(), nil)
+	r.pass.SetBindGroup(0, r.cam.bg, nil)
 	r.pass.SetVertexBuffer(0, mesh.VertexBuffer, 0)
 	r.pass.SetVertexBuffer(1, instances.Buffer(), 0)
 	r.pass.SetIndexBuffer(mesh.IndexBuffer, gputypes.IndexFormatUint32, 0)
@@ -192,7 +199,7 @@ func (r *Renderer) DrawInstancedIndirect(mesh *Mesh, cull *CullPipeline, slot in
 		return
 	}
 	r.pass.SetPipeline(r.instPipe.Pipeline())
-	r.pass.SetBindGroup(0, r.instPipe.BindGroup(), nil)
+	r.pass.SetBindGroup(0, r.cam.bg, nil)
 	r.pass.SetVertexBuffer(0, mesh.VertexBuffer, 0)
 	// The instance stream is bound at this slot's region, so the draw command
 	// needs no FirstInstance and the slots stay independent.
@@ -204,9 +211,10 @@ func (r *Renderer) DrawInstancedIndirect(mesh *Mesh, cull *CullPipeline, slot in
 
 // --- Camera ---
 
-// UpdateCamera updates the camera uniform for instanced draws.
+// UpdateCamera writes the camera every pipeline draws through. One buffer, one
+// write, whatever is drawn this frame.
 func (r *Renderer) UpdateCamera(viewProj [16]float32, viewportW, viewportH float32) {
-	r.instPipe.UpdateCamera(r.queue, viewProj, viewportW, viewportH)
+	r.cam.update(r.queue, viewProj, viewportW, viewportH)
 }
 
 // SubcellPipeline returns the compact cell pipeline, building it on first use.
@@ -214,7 +222,7 @@ func (r *Renderer) UpdateCamera(viewProj [16]float32, viewportW, viewportH float
 // for its ramp table.
 func (r *Renderer) SubcellPipeline() *SubcellPipeline {
 	if r.subcellPipe == nil {
-		r.subcellPipe = NewSubcellPipeline(r.dev, r.queue, r.format)
+		r.subcellPipe = NewSubcellPipeline(r.dev, r.queue, r.format, r.cam.bgl)
 	}
 	return r.subcellPipe
 }
@@ -232,7 +240,8 @@ func (r *Renderer) DrawSubcells(cells *SubcellBuffer) {
 	p := r.SubcellPipeline()
 	mesh := p.Mesh()
 	r.pass.SetPipeline(p.Pipeline())
-	r.pass.SetBindGroup(0, p.BindGroup(), nil)
+	r.pass.SetBindGroup(0, r.cam.bg, nil)
+	r.pass.SetBindGroup(1, p.ParamsBindGroup(), nil)
 	r.pass.SetVertexBuffer(0, mesh.VertexBuffer, 0)
 	r.pass.SetVertexBuffer(1, cells.Buffer(), 0)
 	r.pass.SetIndexBuffer(mesh.IndexBuffer, gputypes.IndexFormatUint32, 0)
@@ -241,13 +250,6 @@ func (r *Renderer) DrawSubcells(cells *SubcellBuffer) {
 	r.stats.DrawCalls++
 	r.stats.Instances += cells.Count()
 	r.stats.Triangles += int(mesh.IndexCount/3) * cells.Count()
-}
-
-// UpdateStrokeCamera updates the camera uniform for stroke draws.
-// The stroke pipeline needs the viewport size for screen-space width
-// calculations, so it maintains a separate camera buffer.
-func (r *Renderer) UpdateStrokeCamera(viewProj [16]float32, viewportW, viewportH float32) {
-	r.strokePipe.UpdateCamera(r.queue, viewProj, viewportW, viewportH)
 }
 
 // --- Stroke draws ---
@@ -274,7 +276,7 @@ func (r *Renderer) DrawStrokesN(segments *StrokeBuffer, n int) {
 	segments.Flush(r.queue)
 
 	r.pass.SetPipeline(r.strokePipe.Pipeline())
-	r.pass.SetBindGroup(0, r.strokePipe.BindGroup(), nil)
+	r.pass.SetBindGroup(0, r.cam.bg, nil)
 	r.pass.SetVertexBuffer(0, r.strokePipe.QuadVertexBuffer(), 0)
 	r.pass.SetVertexBuffer(1, segments.Buffer(), 0)
 	r.pass.SetIndexBuffer(r.strokePipe.QuadIndexBuffer(), gputypes.IndexFormatUint16, 0)
@@ -287,9 +289,10 @@ func (r *Renderer) DrawStrokesN(segments *StrokeBuffer, n int) {
 
 // --- Generic draws ---
 
-// DrawVertices submits a non-indexed draw with a custom pipeline and bind group.
-// Use this for pipelines not built into the Renderer (e.g. custom geometry).
-func (r *Renderer) DrawVertices(pipe *wgpu.RenderPipeline, bindGroup *wgpu.BindGroup, vertexBuffer *wgpu.Buffer, vertexCount uint32) {
+// DrawVertices submits a non-indexed draw with a pipeline built outside the
+// Renderer. The camera is bound at group 0 from the engine's own buffer, so a
+// custom pipeline is built against CameraLayout and owns no camera.
+func (r *Renderer) DrawVertices(pipe *wgpu.RenderPipeline, vertexBuffer *wgpu.Buffer, vertexCount uint32) {
 	if vertexCount == 0 {
 		return
 	}
@@ -297,14 +300,15 @@ func (r *Renderer) DrawVertices(pipe *wgpu.RenderPipeline, bindGroup *wgpu.BindG
 		return
 	}
 	r.pass.SetPipeline(pipe)
-	r.pass.SetBindGroup(0, bindGroup, nil)
+	r.pass.SetBindGroup(0, r.cam.bg, nil)
 	r.pass.SetVertexBuffer(0, vertexBuffer, 0)
 	r.pass.Draw(vertexCount, 1, 0, 0)
 	r.stats.DrawCalls++
 }
 
-// DrawVerticesRange submits a non-indexed draw for a sub-range of a vertex buffer.
-func (r *Renderer) DrawVerticesRange(pipe *wgpu.RenderPipeline, bindGroup *wgpu.BindGroup, vertexBuffer *wgpu.Buffer, vertexCount, firstVertex uint32) {
+// DrawVerticesRange submits a non-indexed draw for a sub-range of a vertex
+// buffer, through the engine's camera at group 0.
+func (r *Renderer) DrawVerticesRange(pipe *wgpu.RenderPipeline, vertexBuffer *wgpu.Buffer, vertexCount, firstVertex uint32) {
 	if vertexCount == 0 {
 		return
 	}
@@ -312,7 +316,7 @@ func (r *Renderer) DrawVerticesRange(pipe *wgpu.RenderPipeline, bindGroup *wgpu.
 		return
 	}
 	r.pass.SetPipeline(pipe)
-	r.pass.SetBindGroup(0, bindGroup, nil)
+	r.pass.SetBindGroup(0, r.cam.bg, nil)
 	r.pass.SetVertexBuffer(0, vertexBuffer, 0)
 	r.pass.Draw(vertexCount, 1, firstVertex, 0)
 	r.stats.DrawCalls++
@@ -330,14 +334,23 @@ func (r *Renderer) Stats() FrameStats                     { return r.stats }
 // current draw callback. Used by the GPU facade for compute cull dispatch.
 func (r *Renderer) CommandEncoder() *wgpu.CommandEncoder { return r.enc }
 
-// CameraBuffer returns the instanced pipeline's camera uniform buffer.
-// Used by the GPU facade for compute cull binding.
-func (r *Renderer) CameraBuffer() *wgpu.Buffer { return r.instPipe.CameraBuffer() }
+// CameraBuffer returns the shared camera uniform buffer, which the compute cull
+// binds so it tests against the same camera the draw uses.
+func (r *Renderer) CameraBuffer() *wgpu.Buffer { return r.cam.buf }
+
+// CameraLayout is the bind group layout of the engine's camera, at group 0. A
+// pipeline built outside the engine lists it first in its own layout and reads
+// the camera at group(0) binding(0); the Renderer binds it for every draw.
+func (r *Renderer) CameraLayout() *wgpu.BindGroupLayout { return r.cam.bgl }
 
 // Release releases GPU resources.
 func (r *Renderer) Release() {
 	r.instPipe.Release()
 	r.strokePipe.Release()
+	if r.cam != nil {
+		r.cam.Release()
+		r.cam = nil
+	}
 	if r.subcellPipe != nil {
 		r.subcellPipe.Release()
 		r.subcellPipe = nil

@@ -121,14 +121,12 @@ func (g *GPU) End() {
 
 // --- Camera ---
 
-// SetCamera updates the camera view-projection for all registered pipelines
-// (sprite, stroke, and subcell if created).
+// SetCamera writes the camera every pipeline draws through, including any built
+// outside the engine against CameraLayout. It is one buffer and one write: a
+// pipeline added later needs no line here, which is what the four separate
+// camera buffers this replaced each cost.
 func (g *GPU) SetCamera(viewProj [16]float32, viewportW, viewportH float32) {
 	g.r.UpdateCamera(viewProj, viewportW, viewportH)
-	g.r.UpdateStrokeCamera(viewProj, viewportW, viewportH)
-	if g.r.subcellPipe != nil {
-		g.r.subcellPipe.UpdateCamera(g.r.queue, viewProj, viewportW, viewportH)
-	}
 }
 
 // --- Instanced draws ---
@@ -271,16 +269,22 @@ func (g *GPU) DrawStrokes(segments *StrokeBuffer) {
 
 // --- Custom pipelines ---
 
-// DrawVertices submits a non-indexed draw with a custom pipeline and bind group.
-// Use this for pipelines created outside the Renderer (e.g. custom geometry).
-func (g *GPU) DrawVertices(pipe *wgpu.RenderPipeline, bindGroup *wgpu.BindGroup, vertexBuffer *wgpu.Buffer, vertexCount uint32) {
-	g.r.DrawVertices(pipe, bindGroup, vertexBuffer, vertexCount)
+// DrawVertices submits a non-indexed draw with a pipeline created outside the
+// Renderer. The camera is bound at group 0 from the engine's buffer, so such a
+// pipeline is built against CameraLayout and owns no camera of its own.
+func (g *GPU) DrawVertices(pipe *wgpu.RenderPipeline, vertexBuffer *wgpu.Buffer, vertexCount uint32) {
+	g.r.DrawVertices(pipe, vertexBuffer, vertexCount)
 }
 
 // DrawVerticesRange submits a non-indexed draw for a sub-range of a vertex buffer.
-func (g *GPU) DrawVerticesRange(pipe *wgpu.RenderPipeline, bindGroup *wgpu.BindGroup, vertexBuffer *wgpu.Buffer, vertexCount, firstVertex uint32) {
-	g.r.DrawVerticesRange(pipe, bindGroup, vertexBuffer, vertexCount, firstVertex)
+func (g *GPU) DrawVerticesRange(pipe *wgpu.RenderPipeline, vertexBuffer *wgpu.Buffer, vertexCount, firstVertex uint32) {
+	g.r.DrawVerticesRange(pipe, vertexBuffer, vertexCount, firstVertex)
 }
+
+// CameraLayout is the bind group layout of the engine's shared camera, for a
+// pipeline built outside the engine. List it first in the pipeline layout and
+// read the camera at group(0) binding(0); the engine binds and updates it.
+func (g *GPU) CameraLayout() *wgpu.BindGroupLayout { return g.r.CameraLayout() }
 
 // --- Accessors ---
 

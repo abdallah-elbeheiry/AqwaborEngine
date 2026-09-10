@@ -2,7 +2,6 @@ package maprender
 
 import (
 	_ "embed"
-	"unsafe"
 
 	"github.com/abdallah-elbeheiry/AqwaborEngine/render"
 	"github.com/gogpu/gputypes"
@@ -15,21 +14,23 @@ var mapWGSL string
 //go:embed shaders/fragment.wgsl
 var mapFragWGSL string
 
-// MapPipeline renders pre-built map geometry with the shared camera uniform.
-// Uses the same 80-byte CameraUniform as the sprite and stroke pipelines.
+// MapPipeline renders pre-built map geometry through the engine's camera.
 // Positions are int32 world-space coords; the viewProj matrix bakes in
 // the scale divisor so the shader just multiplies.
+//
+// It is an example of a pipeline built outside the engine: it lists the
+// engine's camera layout as group 0, reads the camera at group(0) binding(0),
+// and owns no camera buffer. render.GPU binds and updates that for it, so
+// nothing here has to be told when the view moves.
 type MapPipeline struct {
-	pipe      *wgpu.RenderPipeline
-	bgl       *wgpu.BindGroupLayout
-	pl        *wgpu.PipelineLayout
-	cameraBuf *wgpu.Buffer
-	bindGroup *wgpu.BindGroup
-	format    gputypes.TextureFormat
+	pipe   *wgpu.RenderPipeline
+	pl     *wgpu.PipelineLayout
+	format gputypes.TextureFormat
 }
 
-// NewMapPipeline creates the pipeline for pre-built map geometry.
-func NewMapPipeline(dev *wgpu.Device, format gputypes.TextureFormat) *MapPipeline {
+// NewMapPipeline creates the pipeline for pre-built map geometry. camBGL is
+// render.GPU.CameraLayout().
+func NewMapPipeline(dev *wgpu.Device, format gputypes.TextureFormat, camBGL *wgpu.BindGroupLayout) *MapPipeline {
 	p := &MapPipeline{format: format}
 
 	vertMod, err := dev.CreateShaderModule(&wgpu.ShaderModuleDescriptor{
@@ -50,45 +51,9 @@ func NewMapPipeline(dev *wgpu.Device, format gputypes.TextureFormat) *MapPipelin
 	}
 	defer fragMod.Release()
 
-	p.cameraBuf, err = dev.CreateBuffer(&wgpu.BufferDescriptor{
-		Label: "map camera",
-		Size:  render.CameraUniformSize,
-		Usage: gputypes.BufferUsageUniform | gputypes.BufferUsageCopyDst,
-	})
-	if err != nil {
-		panic(err)
-	}
-
-	p.bgl, err = dev.CreateBindGroupLayout(&wgpu.BindGroupLayoutDescriptor{
-		Label: "map bgl",
-		Entries: []gputypes.BindGroupLayoutEntry{
-			{
-				Binding:    0,
-				Visibility: gputypes.ShaderStageVertex,
-				Buffer: &gputypes.BufferBindingLayout{
-					Type: gputypes.BufferBindingTypeUniform,
-				},
-			},
-		},
-	})
-	if err != nil {
-		panic(err)
-	}
-
 	p.pl, err = dev.CreatePipelineLayout(&wgpu.PipelineLayoutDescriptor{
 		Label:            "map pll",
-		BindGroupLayouts: []*wgpu.BindGroupLayout{p.bgl},
-	})
-	if err != nil {
-		panic(err)
-	}
-
-	p.bindGroup, err = dev.CreateBindGroup(&wgpu.BindGroupDescriptor{
-		Label:  "map bg",
-		Layout: p.bgl,
-		Entries: []wgpu.BindGroupEntry{
-			{Binding: 0, Buffer: p.cameraBuf, Size: render.CameraUniformSize},
-		},
+		BindGroupLayouts: []*wgpu.BindGroupLayout{camBGL},
 	})
 	if err != nil {
 		panic(err)
@@ -122,34 +87,13 @@ func NewMapPipeline(dev *wgpu.Device, format gputypes.TextureFormat) *MapPipelin
 	return p
 }
 
-// UpdateCamera writes the shared camera uniform (viewProj + viewport) to the GPU.
-// Matches the same 80-byte layout used by the sprite and stroke pipelines.
-func (p *MapPipeline) UpdateCamera(queue *wgpu.Queue, viewProj [16]float32, viewportW, viewportH float32) {
-	u := render.CameraUniform{
-		ViewProj: viewProj,
-		Viewport: [2]float32{viewportW, viewportH},
-	}
-	src := unsafe.Slice((*byte)(unsafe.Pointer(&u)), render.CameraUniformSize)
-	queue.WriteBuffer(p.cameraBuf, 0, src)
-}
-
 func (p *MapPipeline) Pipeline() *wgpu.RenderPipeline { return p.pipe }
-func (p *MapPipeline) BindGroup() *wgpu.BindGroup     { return p.bindGroup }
 
 func (p *MapPipeline) Release() {
 	if p.pipe != nil {
 		p.pipe.Release()
 	}
-	if p.bgl != nil {
-		p.bgl.Release()
-	}
 	if p.pl != nil {
 		p.pl.Release()
-	}
-	if p.cameraBuf != nil {
-		p.cameraBuf.Release()
-	}
-	if p.bindGroup != nil {
-		p.bindGroup.Release()
 	}
 }
