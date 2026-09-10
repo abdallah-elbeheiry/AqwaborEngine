@@ -26,15 +26,18 @@ Everything else is behind those.
   assumes.
 - [Scheduling](scheduling.md) — fixed-rate ticks, bounded catch-up, and how systems declare what they
   touch so the schedule can run them at the same time.
-- [The render layer](render.md) — the frame's two phases, instanced draws, GPU culling, strokes, the
-  compact cell format, and the ECS components that feed them.
+- [The render layer](render.md) — the frame's two phases, the Scene that draws a
+  world, chunked instance buffers, GPU culling, strokes and the compact cell
+  format. `examples/scenedemo` is the game side of it in one file.
 
 ## Subsystems
 
 - [Window](window.md) — creating a surface and driving a frame.
 - [The widget toolkit](ui.md) — labels, buttons, containers, alignment and themes.
 - [Camera](camera.md) — the 2D view transform, as a component.
-- [Map rendering](maprender.md) — map geometry, and the level of detail a zoom is worth.
+- [Map rendering](maprender.md) — an example, not engine API: map geometry, the
+  level of detail a zoom is worth, and the worked case of a pipeline built
+  outside the engine.
 - [Input](input.md) — keys, mouse, actions and the bindings between them.
 - [Sound](sound.md) — the context, clip and player model, and the volume rule.
 - [Logging](logging.md) — levels, fields, components, and what a log line on a hot path costs.

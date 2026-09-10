@@ -58,25 +58,31 @@ wx, wy := c.LocalToWorld(lx, ly, vpW, vpH)     // viewport pixels → world
 ### View-projection
 
 ```go
-vpMat := camera.ViewProj(*c, vpW, vpH)                   // sprites (no world scale)
-vpMat := render.ViewProjMap(*c, vpW, vpH, worldScale)     // map (with world scale)
+vpMat := camera.ViewProj(*c, vpW, vpH)
 ```
 
-Both return `[16]float32` column-major 4x4 for `render.GPU.SetCamera`.
+It returns a `[16]float32` column-major 4x4 for `render.GPU.SetCamera`.
 
-### Typical world demo frame
+World Y runs down the screen, the way a cell grid reads and the way
+`WorldToLocal` treats it, and clip Y runs up, so the matrix's Y scale is
+negative. The camera's own position lands at clip 0 on both axes; anything else
+is a bug.
+
+A world whose Y runs up, or whose coordinates carry a scale divisor, needs its
+own matrix. `examples/mapdemo` builds one: degrees times a scale, latitude
+running up, so the scale stays positive and the translation is negated.
+
+### A frame
 
 ```go
 c, _ := camComp.Get(camE)
-scene, _ := scenes.Component().Get(mapE)
 
 c.Pan(dx, dy)                    // input writes into Camera
 c.ZoomAt(factor, mx, my, vpW, vpH)
 camera.ClampZoom(c)
 
-vpMat := render.ViewProjMap(*c, vpW, vpH, scene.WorldScale)
-gfx.SetCamera(vpMat, vpW, vpH)
-gfx.Begin(dc, render.Clear{R: scene.ClearR, ...})
-scenes.Draw(mapE)
+gfx.Begin(dc, render.Clear{R: 0.04, G: 0.05, B: 0.08, A: 1})
+gfx.SetCamera(camera.ViewProj(*c, vpW, vpH), vpW, vpH)
+scene.Draw(view)                 // view is the world rectangle the camera covers
 gfx.End()
 ```

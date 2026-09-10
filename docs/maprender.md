@@ -1,92 +1,71 @@
 ---
 title: Map rendering
-tags: [engine, aqwabor, maprender]
+tags: [engine, aqwabor, maprender, example]
 ---
 
-# maprender — Map Data to GPU
+# maprender - map data to the GPU
 
-Triangulates ring fills from `mapdata` and builds GPU-expanded stroke
-centerlines. Draws through `render.Renderer` (fills via dedicated map
-pipeline, strokes via stroke pipeline).
+**This is an example, not engine API.** It lives in `examples/maprender` and
+`examples/mapdemo`, because a map is one game's need rather than every game's.
+The engine gained what it needed to draw one; the map itself moved out.
 
-## Public API
+It is worth reading as the worked example of a pipeline built outside the
+engine: it triangulates ring fills from `examples/mapdata`, builds GPU-expanded
+stroke centrelines, and draws through `render.GPU` with its own vertex format.
 
-### Construction
-
-```go
-rend := maprender.NewRenderer(world, refZoom, ren)
-```
-
-- `world` — loaded `*mapdata.World`
-- `refZoom` — `float32` reference zoom for stroke width calculation
-- `ren` — `*render.Renderer` (set later via `SetRenderer` if GPU not yet init)
-
-### GPU init
+## Building the geometry
 
 ```go
-rend.SetRenderer(gfx.Renderer())  // builds GPU mesh + strokes; must be called once
-rend.SetViewport(vp)
+mesh := maprender.BuildMapMesh(dev, fillGeoms, passes, maprender.MapMeshConfig{})
+strokes, _ := maprender.BuildMapStrokes(dev, strokeGeoms, widthPx, minSegmentPx)
 ```
 
-### Drawing
+`FillGeometry`, `StrokeGeometry` and `DrawPassSpec` are what the caller fills in
+from its own data: coordinates, a rank, and the fill and stroke colours of each
+draw pass.
+
+## The pipeline
 
 ```go
-rend.Draw()  // records fills + strokes into existing render pass
+mapPipe := maprender.NewMapPipeline(gfx.Device(), gfx.SurfaceFormat(), gfx.CameraLayout())
 ```
 
-The caller owns `Begin`/`End`. `Draw` only records draw calls.
+It lists the engine's camera layout as group 0 and reads the camera at
+`@group(0) @binding(0)`, so it owns no camera buffer and needs no update of its
+own: `gfx.SetCamera` covers it along with everything else. That is the pattern
+for any pipeline built outside the engine.
 
-## ECS Integration
+Positions are int32 world coordinates. The view-projection matrix carries the
+scale divisor, so the shader multiplies and nothing converts per vertex.
 
-### MapScene Component
+## Level of detail
 
 ```go
-scenes := maprender.MustRegisterECS(w)
-sceneComp := scenes.Component()
+maxRank := maprender.RankForZoom(cam.Zoom)
+count := pass.CountFor(maxRank)
 ```
 
-Registers the `MapScene` component (clear colour, world scale, active flag).
+Geometry within a pass is emitted in ascending rank order, so everything up to a
+rank is a prefix of the pass's range. A level of detail is then a smaller count
+rather than a per-frame cull: the more ground a pixel covers, the fewer minor
+rivers and lakes are drawn.
 
-```go
-mapE := w.Create()
-sceneComp.Set(mapE, maprender.MapScene{
-    ClearR: world.Background.R,
-    ClearG: world.Background.G,
-    ClearB: world.Background.B,
-    ClearA: world.Background.A,
-    WorldScale: float32(world.Scale),
-    Active: 1,
-})
-```
-
-### Bind / Unbind
-
-Heavy resources (renderer, mesh, strokes) live outside ECS in the `Renderer`.
-`Bind` associates an entity with its renderer:
-
-```go
-scenes.Bind(mapE, rend)
-maprender.Unbind(mapE)  // cleanup
-```
-
-### DrawECS
-
-```go
-scenes.Draw(mapE)
-```
-
-Reads `MapScene` from ECS, looks up bound renderer, calls `Draw()`. The caller
-must own the render pass (`Begin`/`End`).
-
-### Typical world demo frame
+## A frame
 
 ```go
 cam, _ := camComp.Get(camE)
-scene, _ := sceneComp.Get(mapE)
+vpMat := viewProjMap(*cam, vp.Width, vp.Height, world.Scale)
 
-vpMat := render.ViewProjMap(*cam, vp.Width, vp.Height, scene.WorldScale)
-gfx.SetCamera(vpMat, vp.Width, vp.Height)
-gfx.Begin(dc, render.Clear{R: scene.ClearR, G: scene.ClearG, B: scene.ClearB, A: scene.ClearA})
-scenes.Draw(mapE)
+gfx.Begin(dc, render.Clear{R: world.Background.R, G: world.Background.G, B: world.Background.B, A: 1})
+gfx.SetCamera(vpMat, vp.Width, vp.Height)   // the map pipeline reads this too
+
+for _, pass := range mesh.Passes {
+    gfx.DrawVerticesRange(mapPipe.Pipeline(), mesh.Buffer, pass.CountFor(maxRank), pass.Offset)
+}
+gfx.DrawStrokes(strokes)
 gfx.End()
 ```
+
+`examples/mapdemo` is the whole of it, including the matrix: the map's Y runs
+up, unlike the engine's default, so it builds its own rather than using
+`camera.ViewProj`. See [camera](camera.md).

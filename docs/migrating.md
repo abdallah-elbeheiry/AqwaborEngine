@@ -71,6 +71,39 @@ entity and cost 281x the plain loop; with dense storage the loop is the fast pat
 `World.Destroy` no longer takes a cascade flag, and `World.Alive` rejects a handle whose generation
 has been superseded, which every accessor now does.
 
+## Unreleased: the render layer
+
+`camera.ViewProj` puts the camera's own position at clip 0 on both axes. It did
+that on X and not on Y, so a fitted scene was drawn off the top of the screen.
+Anything that worked around it - a private matrix with the Y scale negated -
+comes out.
+
+One camera uniform, owned by the engine at group 0. `Pipeline`, `StrokePipeline`
+and `SubcellPipeline` no longer own one, so:
+
+```go
+// before
+p := render.NewPipeline(dev, format)
+r.UpdateStrokeCamera(vp, w, h)      // and one call per pipeline
+gfx.DrawVertices(pipe, bindGroup, vertexBuf, count)
+
+// after
+p := render.NewPipeline(dev, format, gfx.CameraLayout())
+gfx.SetCamera(vp, w, h)             // one write, every pipeline
+gfx.DrawVertices(pipe, vertexBuf, count)
+```
+
+A pipeline built outside the engine lists `GPU.CameraLayout()` first and reads
+`@group(0) @binding(0)`. Its own bindings start at group 1; the subcell
+pipeline's ramp table and cell size moved there.
+
+`SpriteBatch.Release` frees its instance buffer, which it used to leak.
+
+New: `render.Scene`, which draws what an `ecs.World` holds. A game spawns
+entities and writes components; the scene chunks them into per-layer instance
+buffers, writes only what changed, and submits only the chunks a view covers.
+See [the render layer](render.md), and `examples/scenedemo`.
+
 ## Scheduler
 
 `TickState.DeltaTime` is now `TickState.Delta()`, and `Tick` is the field to reach for. Catch-up is

@@ -33,9 +33,15 @@ gfx.DrawStrokes(strokes)
 gfx.End()
 ```
 
-`SetCamera` writes a single shared camera uniform used by sprite, stroke,
-and map pipelines. `BeginLoad` replaces `Begin` for a frame that keeps what is
-already on the surface.
+`SetCamera` writes the one camera uniform every pipeline draws through. It is a
+single buffer bound at group 0, so a pipeline added later needs no line in
+`SetCamera` and a pipeline built outside the engine gets the camera for free:
+build it against `GPU.CameraLayout()`, read `@group(0) @binding(0)`, and own no
+camera of your own. Group 0 belongs to the engine; a pipeline's own bindings
+start at group 1.
+
+`BeginLoad` replaces `Begin` for a frame that keeps what is already on the
+surface.
 
 A frame that draws nothing opens no render pass.
 
@@ -54,6 +60,10 @@ batch.SetAll(sprites) // dense write, one GPU upload
 
 // Draw (CPU → GPU, all instances visible).
 gfx.DrawSprites(batch)
+
+// Or one range of it, which is what a Scene submits: a range is the run of
+// chunks a view covers.
+gfx.DrawSpritesRange(batch, first, count)
 ```
 
 ### GPU compute culling + indirect draw
@@ -66,6 +76,9 @@ culled := gfx.CullSprites(batch, render.ViewBounds{
 })
 // The draw that consumes it opens the render pass.
 gfx.DrawSpritesCulled(culled)
+
+// Over one range of the batch rather than all of it.
+culled = gfx.CullSpritesRange(batch, first, count, bounds)
 ```
 
 The cull pass runs as a compute shader on the GPU:
@@ -185,88 +198,101 @@ segment into a screen-space quad with miter joins.
 | `map.wgsl`        | Map fill vertex: int32 positions + camera    |
 | `fragment.wgsl`   | Shared fragment passthrough for all pipelines |
 
-## ECS Integration
+## The ECS side
 
-The render package owns plain-old-data components and extract/draw helpers.
-No GPU pointers live in components — the ECS enforces PoD registration.
+The render package owns plain-old-data components and a `Scene`, which is the
+layer between the world and the GPU. A game spawns entities and writes
+components; nothing it touches names a buffer, a pipeline or a bind group.
 
 ### Components
 
-| Component  | Fields                                    | Purpose                    |
-|------------|-------------------------------------------|----------------------------|
-| `Transform`| `X, Y, Rot, SX, SY float32`             | 2D world-space pose        |
-| `Color`    | `R, G, B, A float32`                     | RGBA colour                |
-| `Sprite`   | `Layer float32, UVX, UVY float32, Flags uint32` | Draw order + metadata |
-| `ClearColor`| `R, G, B, A float32`                    | Per-frame background       |
-
-### Registration
+| Component  | Fields                                          | Purpose               |
+|------------|-------------------------------------------------|-----------------------|
+| `Transform`| `X, Y, Rot, SX, SY float32`                     | 2D world-space pose   |
+| `Color`    | `R, G, B, A float32`                            | RGBA colour           |
+| `Sprite`   | `Layer float32, UVX, UVY float32, Flags uint32` | Draw bucket, UV offset|
 
 ```go
 comps := render.MustRegisterECS(w)   // or render.RegisterECS(w) for an error
 ```
 
-Registers all four component types and returns the handles for them. Keep what it returns: a handle
-is the only way to reach a component, and it is not recoverable from the world afterwards.
+Keep what registration returns: a handle is the only way to reach a component,
+and it is not recoverable from the world afterwards.
 
-### Spawning
+### Scene
 
 ```go
-e := render.SpawnSprite(w, comps,
+scene := render.NewScene(gfx, w, comps, render.SceneConfig{ChunkSize: 64})
+
+e := scene.Spawn(
     render.Transform{X: 100, Y: 200, SX: 48, SY: 48},
-    render.Color{R: 1, G: 0, B: 0, A: 1},
-    render.Sprite{Layer: 0},
+    render.Color{R: 1, A: 1},
+    render.Sprite{},
 )
+
+// Each frame:
+scene.Sync()                 // write what changed
+gfx.Begin(dc, clear)
+gfx.SetCamera(camera.ViewProj(*cam, vpW, vpH), vpW, vpH)
+scene.Draw(view)             // culls first, then draws; call between Begin and End
+gfx.End()
 ```
 
-A spawned sprite is awake in the `Transform` store, because extraction walks the awake rows and a
-sprite that is not in that set is not drawn.
+A scene holds one instance buffer per layer, divided into chunks of world space.
+A chunk is a contiguous range of that buffer, so a still chunk is never
+rewritten and never walked; a view is the handful of ranges its chunks cover;
+and what those ranges hold goes to the GPU cull, which drops what is inside a
+visible chunk but outside the view. Coarse on the CPU, fine on the GPU, and
+never per entity in Go.
 
-### Extracting to batch
+Measured by `examples/scenedemo`, 10,000 sprites of which 64 move: 64 instance
+writes a frame, and at a zoom where the view covers a tenth of the field, 1,040
+of the 10,000 instances submitted in 2 draw calls.
+
+### What has changed is told, not discovered
 
 ```go
-batch := gfx.Sprites(1024)        // persistent, created once
-render.ExtractSprites(comps, batch)
+scene.Touch(e)   // this entity's Transform, Color or Sprite has changed
+scene.Drop(e)    // take it out; call this before destroying it
 ```
 
-`ExtractSprites` walks the awake rows of `Transform` and takes `Sprite` per entity, with `Color`
-where present and white where not. Zero scale defaults to 1.
+Moving an entity without `Touch` draws the old position. That is the trade for a
+still world costing nothing: the scene is told what changed rather than looking
+for it.
 
-Sleeping a sprite's `Transform` takes it out of the batch without destroying it, which is how a
-sprite is hidden without costing anything per frame:
+`Spawn` records the entity itself, which is why it exists — setting a component
+does not wake it, so an entity spawned by hand is in no set anything walks.
+
+`Drop` before `World.Destroy`. A destroyed handle cannot be added to a set, so
+the scene has no way of being told after the fact; what covers a game that
+forgets is the sweep, which checks one chunk a `Sync` and reclaims a dead
+entity's slot within a bounded number of frames.
+
+### Layers
+
+`Sprite.Layer` is the draw bucket, clamped to `SceneConfig.Layers`. Each is its
+own buffer and its own chunking, drawn in order.
+
+### What a frame did
 
 ```go
-comps.Transform.Sleep(e)
-comps.Transform.Wake(e)
+s := scene.Stats()
+// s.Written   instances rewritten by the last Sync; zero for a still world
+// s.Rebuilt   layers laid out again, which is the expensive case
+// s.Submitted instances the last Draw covered, before the GPU cull
+// s.Draws     draw calls issued
 ```
 
-Writing past the batch capacity grows it rather than panicking, so a scene larger than the number
-guessed at startup costs one reallocation.
-
-### Drawing
-
-```go
-render.DrawWorld(gfx, batch, dc, clear, viewProj, viewW, viewH, bounds, 64)
-```
-
-Full-frame helper: `Begin` → `SetCamera` → cull and draw if the batch is at or above
-`cullThreshold` → `End`. It follows the frame's two phases, so the cull is encoded before the render
-pass opens.
+`Rebuilt` is the number to watch. A layer is laid out again when a chunk runs
+out of the slack it keeps for membership changes, and that writes every instance
+in the layer.
 
 ### Sharing colours
 
-Shared component instances are gone with the pool that backed them: one dense array per type has
-nowhere to put a value two entities point at.
+Shared component instances are gone with the pool that backed them: one dense
+array per type has nowhere to put a value two entities point at.
 
-Where many instances carry the same colour because it is an identity rather than an arbitrary value,
-that is what the palette index on the compact cell format is for. See the cell section above. For
-sprites, write the colour on each; it is four floats in a buffer that is written densely anyway.
-
-### ViewProjMap
-
-```go
-vpMat := render.ViewProjMap(camComp, viewW, viewH, worldScale)
-```
-
-Builds a column-major 4x4 orthographic matrix from a `camera.Camera`
-component with a world scale factor baked in (for `mapdata` int32 coordinates).
-Used by the world map demo; sprites use `camera.ViewProj` instead.
+Where many instances carry the same colour because it is an identity rather than
+an arbitrary value, that is what the palette index on the compact cell format is
+for. For sprites, write the colour on each; it is four floats in a buffer that is
+written densely anyway.
