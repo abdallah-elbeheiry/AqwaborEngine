@@ -15,9 +15,14 @@ import (
 // are inside a visible chunk but outside the view. Coarse on the CPU, fine on
 // the GPU, and never per entity in Go.
 //
-// What has changed is told, not discovered. Spawn records it, Touch records it
-// for anything the game moves, and Sync is what turns those into writes. A
-// still world costs nothing per frame, which is the whole point.
+// What has changed is told, not discovered, and what tells it is the ECS's own
+// awake partition: a Transform that is awake is one whose instance has to be
+// written again. Sync writes those and puts them back to sleep. A still world
+// is a world with nothing awake, and costs nothing per frame.
+//
+// The scene invents no vocabulary of its own for this. Waking already means
+// "this needs visiting" everywhere else in the engine, and a second way of
+// saying it is how two subsystems end up disagreeing about what changed.
 type Scene struct {
 	gfx   *GPU
 	world *ecs.World
@@ -25,7 +30,11 @@ type Scene struct {
 
 	layers  []*sceneLayer
 	layerOf map[ecs.Entity]int
-	dirty   *ecs.Set
+
+	// awake is the entities Sync is about to visit, copied out of the store
+	// before any of them is slept: sleeping swaps rows, so walking the live
+	// partition while emptying it would skip half of them.
+	awake []ecs.Entity
 
 	cullFrom int
 	maxRuns  int
@@ -109,7 +118,6 @@ func NewScene(gfx *GPU, w *ecs.World, comps Components, cfg SceneConfig) *Scene 
 		world:    w,
 		comps:    comps,
 		layerOf:  make(map[ecs.Entity]int),
-		dirty:    w.NewSet(),
 		cullFrom: cfg.CullFrom,
 		maxRuns:  cfg.MaxRuns,
 	}
@@ -119,25 +127,19 @@ func NewScene(gfx *GPU, w *ecs.World, comps Components, cfg SceneConfig) *Scene 
 	return s
 }
 
-// Spawn creates a drawable entity and records that it has to be written.
+// Spawn creates a drawable entity and wakes it, so the next Sync writes it.
 //
-// It exists because setting a component does not wake it, so an entity spawned
-// by hand is in no set the scene walks and is never drawn. That was found from
-// the outside: the first game on this engine fell back to visiting every row
-// because of it.
+// It exists because setting a component does not wake it, and an entity that is
+// asleep is in nothing the scene walks. That was found from the outside: the
+// first game on this engine fell back to visiting every row because of it.
 func (s *Scene) Spawn(t Transform, c Color, sp Sprite) ecs.Entity {
 	e := s.world.Create()
 	s.comps.Transform.Set(e, t)
 	s.comps.Color.Set(e, c)
 	s.comps.Sprite.Set(e, sp)
-	s.dirty.Add(e)
+	s.comps.Transform.Wake(e)
 	return e
 }
-
-// Touch records that an entity's Transform, Color or Sprite has changed and its
-// instance has to be written again. Moving something without it draws the old
-// position, because a scene is told what changed rather than looking for it.
-func (s *Scene) Touch(e ecs.Entity) { s.dirty.Add(e) }
 
 // Drop takes an entity out of the scene. Its slot is blanked rather than
 // reclaimed, so dropping is a write and not a relayout.
@@ -148,6 +150,7 @@ func (s *Scene) Touch(e ecs.Entity) { s.dirty.Add(e) }
 // finds a dead entity within a bounded number of frames; Drop is what makes it
 // immediate.
 func (s *Scene) Drop(e ecs.Entity) {
+	s.comps.Transform.Sleep(e)
 	li, ok := s.layerOf[e]
 	if !ok {
 		return
@@ -157,21 +160,25 @@ func (s *Scene) Drop(e ecs.Entity) {
 		s.stats.Written++
 	}
 	delete(s.layerOf, e)
-	s.dirty.Remove(e)
 }
 
-// Sync writes what changed into the layer buffers. It reads Transform, Sprite
-// and Color and writes nothing back, so a Schedule can declare it as
-// Reads(transform, sprite, color) and run it beside anything that does not
-// write them.
+// Sync writes the awake transforms into the layer buffers and puts them back to
+// sleep. Wake an entity when you move, recolour or re-layer it; leave it asleep
+// and it keeps the instance it already has.
+//
+// It reads Transform, Sprite and Color and writes none of them, so a Schedule
+// can declare it as Reads(transform, sprite, color) and run it beside anything
+// that does not write them. What it does write is the awake partition of
+// Transform, which belongs to the renderer.
 func (s *Scene) Sync() {
 	s.stats.Written = 0
 	s.stats.Rebuilt = 0
 
-	s.dirty.Each(func(e ecs.Entity) {
+	s.awake = append(s.awake[:0], s.comps.Transform.Owners()...)
+	for _, e := range s.awake {
 		s.sync(e)
-	})
-	s.dirty.Clear()
+		s.comps.Transform.Sleep(e)
+	}
 
 	for li := range s.layers {
 		s.sweepOne(li)

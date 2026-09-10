@@ -252,16 +252,22 @@ of the 10,000 instances submitted in 2 draw calls.
 ### What has changed is told, not discovered
 
 ```go
-scene.Touch(e)   // this entity's Transform, Color or Sprite has changed
-scene.Drop(e)    // take it out; call this before destroying it
+comps.Transform.Wake(e)   // this entity has to be written again
+scene.Drop(e)             // take it out; call this before destroying it
 ```
 
-Moving an entity without `Touch` draws the old position. That is the trade for a
-still world costing nothing: the scene is told what changed rather than looking
-for it.
+An awake `Transform` is one whose instance has to be written. `Sync` writes the
+awake rows and puts them back to sleep, so a still world is a world with nothing
+awake. Move an entity without waking it and it draws where it was.
 
-`Spawn` records the entity itself, which is why it exists — setting a component
-does not wake it, so an entity spawned by hand is in no set anything walks.
+There is no separate dirty list. Waking already means "this needs visiting"
+everywhere else in the engine, and a second way of saying it is how two
+subsystems come to disagree about what changed. The awake partition of
+`Transform` belongs to the renderer; give a simulation its own components or its
+own `ecs.Set`.
+
+`Spawn` wakes what it creates, which is why it exists — setting a component does
+not wake it, and an entity that is asleep is in nothing the scene walks.
 
 `Drop` before `World.Destroy`. A destroyed handle cannot be added to a set, so
 the scene has no way of being told after the fact; what covers a game that

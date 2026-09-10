@@ -21,7 +21,6 @@ import (
 	"github.com/abdallah-elbeheiry/AqwaborEngine/window"
 
 	"github.com/gogpu/gogpu"
-	"github.com/gogpu/ui/geometry"
 )
 
 func main() {
@@ -60,8 +59,11 @@ func runWorldDemo() {
 	camComp := camera.MustRegisterECS(w)
 	_ = render.MustRegisterECS(w)
 
-	// Camera entity.
-	vp := geometry.Sz(1280, 720)
+	// The viewport is read from the frame rather than remembered from the size
+	// the window was asked for: moving to a display with a different backing
+	// scale resizes the surface, and a projection built for the old size draws
+	// the map into a corner of the new one.
+	vpW, vpH := float32(1280), float32(720)
 	camE := w.Create()
 	camComp.Set(camE, camera.Camera{
 		MinZoom: 0.01,
@@ -70,7 +72,7 @@ func runWorldDemo() {
 	})
 	camComp.Wake(camE)
 	c, _ := camComp.Get(camE)
-	c.Fit(360, 180, vp.Width, vp.Height)
+	c.Fit(360, 180, vpW, vpH)
 	c.X = 0
 	c.Y = 0
 
@@ -99,27 +101,24 @@ func runWorldDemo() {
 		c.Pan(float32(dx), -float32(dy))
 	})
 
-	zoomInAction := mgr.Action("zoom_in")
-	mgr.BindKey(zoomInAction, input.KeyEqual)
-	zoomInAction.OnPressed(func(_ input.Context) {
-		c, ok := camComp.Get(camE)
-		if !ok {
-			return
-		}
-		c.Zoom *= 1.1
-		camera.ClampZoom(c)
-	})
-
-	zoomOutAction := mgr.Action("zoom_out")
-	mgr.BindKey(zoomOutAction, input.KeyMinus)
-	zoomOutAction.OnPressed(func(_ input.Context) {
-		c, ok := camComp.Get(camE)
-		if !ok {
-			return
-		}
-		c.Zoom /= 1.1
-		camera.ClampZoom(c)
-	})
+	// E and Q as well as = and -, because = is not a key of its own on a German
+	// ISO layout and - is not where the ANSI code expects it.
+	zoom := func(name string, key input.Key, factor float32) {
+		a := mgr.Action(name)
+		mgr.BindKey(a, key)
+		a.OnPressed(func(_ input.Context) {
+			c, ok := camComp.Get(camE)
+			if !ok {
+				return
+			}
+			c.Zoom *= factor
+			camera.ClampZoom(c)
+		})
+	}
+	zoom("zoom_in", input.KeyE, 1.1)
+	zoom("zoom_out", input.KeyQ, 1/1.1)
+	zoom("zoom_in_ansi", input.KeyEqual, 1.1)
+	zoom("zoom_out_ansi", input.KeyMinus, 1/1.1)
 
 	resetAction := mgr.Action("reset")
 	mgr.BindKey(resetAction, input.KeyR)
@@ -128,7 +127,7 @@ func runWorldDemo() {
 		if !ok {
 			return
 		}
-		c.Fit(360, 180, float32(vp.Width), float32(vp.Height))
+		c.Fit(360, 180, vpW, vpH)
 		c.X = 0
 		c.Y = 0
 	})
@@ -136,7 +135,7 @@ func runWorldDemo() {
 	var lastFrame time.Time
 	lastFrame = time.Now()
 
-	logx.Info("mapdemo running: drag to pan, scroll to zoom, R=reset, =/- zoom")
+	logx.Info("mapdemo running: drag to pan, scroll to zoom, R=reset, E/Q or =/- zoom")
 
 	var gfx *render.GPU
 	var mapMesh *maprender.MapMesh
@@ -144,7 +143,14 @@ func runWorldDemo() {
 	var strokeBuf *render.StrokeBuffer
 	var worldScale float32
 
+	win.OnResize(func(w, h int) { logx.Info("resized", "w", w, "h", h) })
+
 	if err := win.Run(func(dc *gogpu.Context) {
+		if w, h := dc.Size(); w > 0 && h > 0 {
+			vpW, vpH = float32(w), float32(h)
+		}
+		win.WatchScale(dc.ScaleFactor())
+
 		now := time.Now()
 		dt := now.Sub(lastFrame).Seconds()
 		lastFrame = now
@@ -237,12 +243,12 @@ func runWorldDemo() {
 					factor = 1 / 1.1
 				}
 				mx, my := app.Input().Mouse().Position()
-				c.ZoomAt(factor, float32(mx), float32(my), float32(vp.Width), float32(vp.Height))
+				c.ZoomAt(factor, float32(mx), float32(my), vpW, vpH)
 			}
 		}
 
 		cam, _ := camComp.Get(camE)
-		vpMat := viewProjMap(*cam, float32(vp.Width), float32(vp.Height), worldScale)
+		vpMat := viewProjMap(*cam, vpW, vpH, worldScale)
 
 		if err := gfx.Begin(dc, render.Clear{
 			R: world.Background.R, G: world.Background.G,
@@ -253,7 +259,7 @@ func runWorldDemo() {
 		// One SetCamera covers the map pipeline too: it was built against the
 		// engine's camera layout, so it reads the same buffer the sprite and
 		// stroke pipelines do.
-		gfx.SetCamera(vpMat, float32(vp.Width), float32(vp.Height))
+		gfx.SetCamera(vpMat, vpW, vpH)
 
 		// Draw fills via the generic vertex draw.
 		maxRank := maprender.RankForZoom(cam.Zoom)

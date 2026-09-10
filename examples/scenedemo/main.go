@@ -172,7 +172,7 @@ func main() {
 			}
 			tr.X += float32(math.Cos(t+float64(i)) * 0.6)
 			tr.Y += float32(math.Sin(t+float64(i)) * 0.6)
-			scene.Touch(e)
+			comps.Transform.Wake(e)
 		}
 		syncStart := time.Now()
 		scene.Sync()

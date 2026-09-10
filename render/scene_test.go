@@ -73,7 +73,7 @@ func TestSceneWritesOnlyWhatChanged(t *testing.T) {
 	// One entity moves inside its chunk: one write, no relayout.
 	tr, _ := s.comps.Transform.Get(moved)
 	tr.X += 0.5
-	s.Touch(moved)
+	s.comps.Transform.Wake(moved)
 	s.Sync()
 
 	if got := s.Stats().Written; got != 1 {
@@ -100,7 +100,7 @@ func TestSceneKeepsSlotAcrossAChunk(t *testing.T) {
 	// Moving within the chunk keeps the slot.
 	tr, _ := s.comps.Transform.Get(e)
 	tr.X = 30
-	s.Touch(e)
+	s.comps.Transform.Wake(e)
 	s.Sync()
 	if got, _ := s.layers[0].grid.indexOf(e); got != first {
 		t.Fatalf("slot moved to %d inside one chunk, want %d", got, first)
@@ -109,7 +109,7 @@ func TestSceneKeepsSlotAcrossAChunk(t *testing.T) {
 	// Crossing into the next chunk takes a slot there.
 	tr, _ = s.comps.Transform.Get(e)
 	tr.X = 40
-	s.Touch(e)
+	s.comps.Transform.Wake(e)
 	s.Sync()
 	if got, _ := s.layers[0].grid.indexOf(e); got == first {
 		t.Fatal("crossing a chunk boundary kept the old slot")
@@ -164,11 +164,11 @@ func TestSceneSweepFindsADestroyedEntity(t *testing.T) {
 	s.Sync()
 	idx, _ := s.layers[0].grid.indexOf(e)
 
-	// Destroyed without a Drop: the handle can no longer be added to a set, so
-	// only the sweep can find it.
+	// Destroyed without a Drop: waking it is refused because its row is gone,
+	// so only the sweep can find it.
 	w.Destroy(e)
-	if s.Touch(e); s.dirty.Len() != 0 {
-		t.Fatal("a destroyed entity was accepted into the dirty set")
+	if s.comps.Transform.Wake(e) {
+		t.Fatal("a destroyed entity was woken")
 	}
 
 	chunks := len(s.layers[0].grid.chunks)
@@ -205,7 +205,7 @@ func TestSceneLayersAreSeparateBuffers(t *testing.T) {
 	idx, _ := s.layers[1].grid.indexOf(back)
 	sp, _ := s.comps.Sprite.Get(back)
 	sp.Layer = 0
-	s.Touch(back)
+	s.comps.Transform.Wake(back)
 	s.Sync()
 
 	if got := recs[1].entries[idx]; got.Scale != [2]float32{0, 0} {
@@ -251,7 +251,7 @@ func TestSceneCrossingAChunkLeavesNoGhost(t *testing.T) {
 
 	tr, _ := s.comps.Transform.Get(e)
 	tr.X = 40 // into the chunk next door, which already exists
-	s.Touch(e)
+	s.comps.Transform.Wake(e)
 	s.Sync()
 
 	if got := s.Stats().Rebuilt; got != 0 {
@@ -264,5 +264,39 @@ func TestSceneCrossingAChunkLeavesNoGhost(t *testing.T) {
 	if got := recs[0].entries[was]; got.Scale != [2]float32{0, 0} {
 		t.Fatalf("the slot it left still draws it: scale %v at %v; the sprite stays frozen where it was",
 			got.Scale, got.Position)
+	}
+}
+
+// Waking is how a scene is told something changed, and Sync consumes it: the
+// awake partition of Transform is the redraw set and nothing else.
+func TestSceneConsumesTheAwakeSet(t *testing.T) {
+	s, _, _ := sceneForTest(t, SceneConfig{ChunkSize: 32})
+
+	a := s.Spawn(Transform{X: 1, SX: 1, SY: 1}, Color{A: 1}, Sprite{})
+	b := s.Spawn(Transform{X: 2, SX: 1, SY: 1}, Color{A: 1}, Sprite{})
+
+	if s.comps.Transform.AwakeLen() != 2 {
+		t.Fatalf("awake after two spawns = %d, want 2", s.comps.Transform.AwakeLen())
+	}
+
+	s.Sync()
+	if got := s.comps.Transform.AwakeLen(); got != 0 {
+		t.Fatalf("awake after Sync = %d, want 0: Sync consumes what it wrote", got)
+	}
+	if s.Stats().Written < 2 {
+		t.Fatalf("Sync wrote %d instances for two spawns", s.Stats().Written)
+	}
+
+	// Waking one entity is one write, and it does not wake the other.
+	tr, _ := s.comps.Transform.Get(b)
+	tr.X = 5
+	s.comps.Transform.Wake(b)
+	s.Sync()
+
+	if got := s.Stats().Written; got != 1 {
+		t.Fatalf("one woken entity wrote %d instances, want 1", got)
+	}
+	if s.comps.Transform.Awake(a) {
+		t.Fatal("waking one entity woke another")
 	}
 }
