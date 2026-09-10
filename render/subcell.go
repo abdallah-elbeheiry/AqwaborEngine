@@ -51,14 +51,35 @@ var SubcellBufferLayout = gputypes.VertexBufferLayout{
 // uniform binding is guaranteed.
 const RampEntries = 1024
 
-// RampTable is the palette the compact instances index into. Index zero is
-// reserved: an instance carrying palette 0 draws nothing, so a cell can be
-// cleared without being removed from the buffer.
+// RampTable is the palette the compact instances index into.
 //
-// How materials and rows map onto a flat index belongs to the game, not here.
+// Materials are numbered from zero and a cell carries PaletteOf(material),
+// which is one more than the material. The shift is what reserves a value for
+// "draws nothing": a cell carrying 0 is skipped, so it can be cleared without
+// being taken out of the buffer. Entry zero of the table is an ordinary colour,
+// the one material zero draws with.
+//
+// Use Set rather than writing Colors directly, and the shift stops being
+// something to remember.
+//
+// How materials and rows map onto a flat material number belongs to the game,
+// not here.
 type RampTable struct {
 	Colors [RampEntries][4]float32
 }
+
+// Set gives a material its colour. Materials are numbered from zero.
+func (t *RampTable) Set(material int, r, g, b, a float32) {
+	if material < 0 || material >= RampEntries {
+		log.Error("material is outside the ramp table", "material", material, "entries", RampEntries)
+		return
+	}
+	t.Colors[material] = [4]float32{r, g, b, a}
+}
+
+// PaletteOf is the value a cell carries to draw with a material's colour.
+// Zero is not a material: a cell carrying it draws nothing.
+func PaletteOf(material int) uint32 { return uint32(material) + 1 }
 
 const rampTableSize = RampEntries * 16
 

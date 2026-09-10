@@ -28,9 +28,7 @@ import (
 	"github.com/gogpu/gogpu"
 )
 
-// materials is how many colours the grid draws with. Index 0 is reserved: a
-// cell carrying it draws nothing, which is how a cell is cleared without being
-// taken out of the buffer.
+// materials is how many colours the grid draws with.
 const materials = 16
 
 func main() {
@@ -122,7 +120,7 @@ func main() {
 				for x := range *side {
 					grid = append(grid, render.SubcellInstance{
 						X: float32(x) + 0.5, Y: float32(y) + 0.5,
-						Palette: uint32(1 + (x/8+y/8)%materials),
+						Palette: render.PaletteOf((x/8 + y/8) % materials),
 					})
 				}
 			}
@@ -156,17 +154,16 @@ func main() {
 	}
 }
 
-// setRamp fills the palette. Index zero stays black and unused: a cell carrying
-// it draws nothing.
+// setRamp fills the palette. Materials are numbered from zero; a cell carries
+// PaletteOf(material), and a cell carrying zero draws nothing.
 func setRamp(gfx *render.GPU, table *render.RampTable, phase float32) {
-	for i := range materials {
-		h := float64(i)/materials + float64(phase)*0.1
-		table.Colors[i+1] = [4]float32{
-			float32(0.5 + 0.5*math.Sin(2*math.Pi*h)),
-			float32(0.5 + 0.5*math.Sin(2*math.Pi*(h+1.0/3))),
-			float32(0.5 + 0.5*math.Sin(2*math.Pi*(h+2.0/3))),
-			1,
-		}
+	for m := range materials {
+		h := float64(m)/materials + float64(phase)*0.1
+		table.Set(m,
+			float32(0.5+0.5*math.Sin(2*math.Pi*h)),
+			float32(0.5+0.5*math.Sin(2*math.Pi*(h+1.0/3))),
+			float32(0.5+0.5*math.Sin(2*math.Pi*(h+2.0/3))),
+			1)
 	}
 	gfx.SetRamp(table)
 }
