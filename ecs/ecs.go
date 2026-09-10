@@ -1,477 +1,151 @@
+// Package ecs is the entity component system: entities are generational
+// handles, a component type is one dense array, and a system iterates the rows
+// that are awake.
+//
+// The shape to hold in mind is that storage and scheduling are separate. A
+// component store says where a value lives; it does not decide who runs. What
+// runs is the awake partition of a store, which a system moves entities in and
+// out of, so an entity with nothing to do is in no list anything walks.
+//
+//	w := ecs.NewWorld()
+//	pos := ecs.MustRegister[Position](w)
+//	e := w.Create()
+//	pos.Set(e, Position{X: 1})
+//	pos.Wake(e)
+//	pos.Each(func(e ecs.Entity, p *Position) { p.X++ })
 package ecs
 
 import (
-	"slices"
-	"unsafe"
-
 	"github.com/abdallah-elbeheiry/AqwaborEngine/logx"
 )
 
 // WorldOption configures a World during construction.
 type WorldOption func(*World)
 
-// WithLogger injects a logx logger. If omitted, a sensible default is used.
+// WithLogger injects a logger. Without it the world logs under component=ecs.
 func WithLogger(l *logx.Logger) WorldOption {
-	return func(w *World) {
-		w.log = l
-	}
+	return func(w *World) { w.log = l }
 }
 
-// World is the single monolithic ECS world. It owns all entities, components,
-// storage, and systems.
+// World owns the entities, the component stores and the deferred command
+// buffer.
 type World struct {
 	log *logx.Logger
 
-	entities   *entityAllocator
-	registry   *componentRegistry
-	pool       *componentPool
-	tableGraph *tableGraph
-	systems    *systemManager
-	cmdBuf     *commandBuffer
+	entities *entityAllocator
+	registry *componentRegistry
+	stores   []store
+	cmdBuf   *commandBuffer
+	timers   *Timers
+	sets     []*Set
+
+	systems *systemManager
 }
 
-// NewWorld creates a self-contained World.
+// NewWorld creates an empty world.
 func NewWorld(opts ...WorldOption) *World {
-	w := &World{
-		log: logx.With("component", "ecs"),
-	}
-
+	w := &World{log: logx.With("component", "ecs")}
 	for _, o := range opts {
 		o(w)
 	}
-
-	w.entities = newEntityAllocator(w.log)
-	w.registry = newComponentRegistry(w.log)
-	w.pool = newComponentPool(w.log)
-	w.tableGraph = newTableGraph(w.log)
-	w.systems = newSystemManager(w.log)
-	w.cmdBuf = newCommandBuffer(w.log)
-
+	w.entities = newEntityAllocator()
+	w.registry = newComponentRegistry()
+	w.cmdBuf = newCommandBuffer()
+	w.timers = newTimers()
+	w.systems = newSystemManager()
 	w.log.Info("world created")
 	return w
 }
 
-// --- Entity lifecycle ---
-
+// Create returns a new entity holding no components.
 func (w *World) Create() Entity {
-	return w.entities.create(w.log)
+	e := w.entities.create()
+	if w.log.Enabled(logx.TraceLevel) {
+		w.log.Trace("entity created", "entity", e)
+	}
+	return e
 }
 
-// Destroy removes the entity. When cascade is true, component instances
-// whose refcount reaches zero are also destroyed from the pool.
-func (w *World) Destroy(e Entity, cascade bool) {
-	w.destroyEntity(e, cascade)
-}
-
-func (w *World) destroyEntity(e Entity, cascade bool) {
-	if !w.entities.alive(e) {
-		w.log.Warn("destroy called on dead entity", "entity", e)
-		return
-	}
-
-	w.log.Info("destroying entity", "entity", e, "cascade", cascade)
-
-	meta := w.entities.meta(e)
-
-	// Release all component handles in deterministic order (sorted by ComponentID).
-	cids := make([]ComponentID, 0, len(meta.components))
-	for cid := range meta.components {
-		cids = append(cids, cid)
-	}
-	slices.Sort(cids)
-	for _, cid := range cids {
-		h := meta.components[cid]
-		zeroed, err := w.pool.release(h, w.log)
-		if err != nil {
-			w.log.Error("error releasing component", "entity", e, "component_id", cid, "err", err)
-			continue
-		}
-		if zeroed && cascade {
-			w.pool.destroy(h, w.log)
-			w.log.Debug("component cascade destroyed", "entity", e, "component_id", cid)
-		}
-	}
-
-	// Remove from table
-	if meta.tableID != noLocation && meta.row != noLocation {
-		t := w.tableGraph.get(tableID(meta.tableID))
-		if t != nil {
-			_, swapped := t.remove(meta.row, w.log)
-			if swapped != e {
-				swappedMeta := w.entities.meta(swapped)
-				if swappedMeta != nil {
-					swappedMeta.row = meta.row
-				}
-			}
-		}
-	}
-
-	w.entities.destroy(e, w.log)
-}
-
-func (w *World) Alive(e Entity) bool {
-	return w.entities.alive(e)
-}
-
-// --- Component creation (unified) ---
-
-// Create creates a new component instance in the pool. Returns a Handle
-// that can be attached to any number of entities.
-func Create[T any](w *World, c T) (Handle, error) {
-	info, ok := w.registry.lookup(typeOf[T]())
-	if !ok {
-		return Handle{}, &ErrComponentNotRegistered{Type: typeOf[T]()}
-	}
-
-	data := unsafe.Pointer(&make([]byte, info.size)[0])
-	*(*T)(data) = c
-
-	h := w.pool.create(info, data, w.log)
-	return h, nil
-}
-
-// DestroyHandle explicitly destroys a component instance from the pool.
-// Call this when you no longer need an instance and no entities reference it.
-func DestroyHandle(w *World, h Handle) {
-	w.pool.destroy(h, w.log)
-}
-
-// --- Entity ↔ component relationship ---
-
-// Attach attaches a component handle to an entity. Multiple entities may
-// hold the same Handle, sharing the underlying instance.
-func Attach[T any](w *World, e Entity, h Handle) error {
-	if !w.entities.alive(e) {
-		return &ErrEntityDead{Entity: e}
-	}
-
-	info, ok := w.registry.lookup(typeOf[T]())
-	if !ok {
-		return &ErrComponentNotRegistered{Type: typeOf[T]()}
-	}
-
-	return w.attachHandle(e, info.id, h)
-}
-
-func (w *World) attachHandle(e Entity, componentID ComponentID, h Handle) error {
-	meta := w.entities.meta(e)
-	if meta == nil {
-		w.log.Error("attachHandle on invalid entity", "entity", e)
-		return &ErrEntityDead{Entity: e}
-	}
-
-	if _, ok := meta.components[componentID]; ok {
-		w.log.Warn("entity already has component", "entity", e, "component_id", componentID)
-		return nil
-	}
-
-	if err := w.pool.acquire(h, w.log); err != nil {
-		w.log.Error("failed to acquire component", "entity", e, "err", err)
-		return err
-	}
-
-	meta.components[componentID] = h
-
-	// Transition table
-	currentTable := noTable
-	if meta.tableID != noLocation {
-		currentTable = tableID(meta.tableID)
-	}
-	newTableID := w.tableGraph.transitionAdd(currentTable, componentID, w.log)
-	w.moveEntityToTable(e, meta, currentTable, newTableID)
-
-	w.log.Info("component attached", "entity", e, "component_id", componentID)
-	return nil
-}
-
-// Detach removes a component from an entity. The component instance
-// refcount is decremented.
-func Detach[T any](w *World, e Entity) error {
-	if !w.entities.alive(e) {
-		return &ErrEntityDead{Entity: e}
-	}
-
-	info, ok := w.registry.lookup(typeOf[T]())
-	if !ok {
-		return &ErrComponentNotRegistered{Type: typeOf[T]()}
-	}
-
-	w.detachComponent(e, info.id)
-	return nil
-}
-
-func (w *World) detachComponent(e Entity, componentID ComponentID) {
-	meta := w.entities.meta(e)
-	if meta == nil {
-		return
-	}
-
-	h, ok := meta.components[componentID]
-	if !ok {
-		w.log.Warn("entity does not have component", "entity", e, "component_id", componentID)
-		return
-	}
-
-	zeroed, err := w.pool.release(h, w.log)
-	if err != nil {
-		w.log.Error("failed to release component", "entity", e, "err", err)
-		return
-	}
-	if zeroed {
-		w.log.Debug("component refcount reached zero", "entity", e, "component_id", componentID)
-	}
-
-	delete(meta.components, componentID)
-
-	// Transition table
-	currentTable := noTable
-	if meta.tableID != noLocation {
-		currentTable = tableID(meta.tableID)
-	}
-	newTableID := w.tableGraph.transitionRemove(currentTable, componentID, w.log)
-	w.moveEntityToTable(e, meta, currentTable, newTableID)
-
-	w.log.Info("component detached", "entity", e, "component_id", componentID)
-}
-
-// --- Convenience: create + attach in one step ---
-
-// Add creates a new component instance and attaches it to the entity.
-// This is the common 1:1 case. For N:1 sharing, use Create + Attach.
-func Add[T any](w *World, e Entity, c T) error {
-	if !w.entities.alive(e) {
-		return &ErrEntityDead{Entity: e}
-	}
-
-	info, ok := w.registry.lookup(typeOf[T]())
-	if !ok {
-		return &ErrComponentNotRegistered{Type: typeOf[T]()}
-	}
-
-	// Check if already has this component
-	meta := w.entities.meta(e)
-	if _, has := meta.components[info.id]; has {
-		w.log.Warn("entity already has component", "entity", e, "component_id", info.id)
-		return nil
-	}
-
-	data := unsafe.Pointer(&make([]byte, info.size)[0])
-	*(*T)(data) = c
-
-	h := w.pool.create(info, data, w.log)
-	w.attachHandle(e, info.id, h)
-	return nil
-}
-
-// Remove detaches a component from the entity.
-// Convenience alias for Detach[T].
-func Remove[T any](w *World, e Entity) error {
-	return Detach[T](w, e)
-}
-
-// --- Get / Has ---
-
-// Get returns a pointer to the component data for the given entity.
-// The pointer is valid as long as the component is attached.
-func Get[T any](w *World, e Entity) (*T, bool) {
-	if !w.entities.alive(e) {
-		return nil, false
-	}
-
-	info, ok := w.registry.lookup(typeOf[T]())
-	if !ok {
-		return nil, false
-	}
-
-	meta := w.entities.meta(e)
-	if meta == nil {
-		return nil, false
-	}
-
-	h, ok := meta.components[info.id]
-	if !ok {
-		return nil, false
-	}
-
-	return getTyped[T](w.pool, h)
-}
-
-// Has reports whether the entity has a component of the given type.
-func Has[T any](w *World, e Entity) bool {
+// Destroy retires an entity, removes it from every component store and cancels
+// any timer it was waiting on. A stale handle destroys nothing.
+func (w *World) Destroy(e Entity) bool {
 	if !w.entities.alive(e) {
 		return false
 	}
-
-	info, ok := w.registry.lookup(typeOf[T]())
-	if !ok {
-		return false
+	for _, s := range w.stores {
+		s.removeEntity(e)
 	}
-
-	meta := w.entities.meta(e)
-	if meta == nil {
-		return false
+	for _, set := range w.sets {
+		set.Remove(e)
 	}
-
-	_, ok = meta.components[info.id]
-	return ok
+	w.timers.Cancel(e)
+	w.entities.destroy(e)
+	if w.log.Enabled(logx.TraceLevel) {
+		w.log.Trace("entity destroyed", "entity", e)
+	}
+	return true
 }
 
-// HandleOf returns the Handle for a component on an entity, if present.
-// Useful for recovering a handle from something originally added via Add.
-func HandleOf[T any](w *World, e Entity) (Handle, bool) {
-	if !w.entities.alive(e) {
-		return Handle{}, false
-	}
+// Alive reports whether the handle names a live entity. A handle whose
+// generation has been superseded is not alive, even though its index is in use.
+func (w *World) Alive(e Entity) bool { return w.entities.alive(e) }
 
-	info, ok := w.registry.lookup(typeOf[T]())
-	if !ok {
-		return Handle{}, false
-	}
+// Count is the number of live entities.
+func (w *World) Count() int { return w.entities.count() }
 
-	meta := w.entities.meta(e)
-	if meta == nil {
-		return Handle{}, false
-	}
+// ComponentCount is the number of registered component types.
+func (w *World) ComponentCount() int { return len(w.stores) }
 
-	h, ok := meta.components[info.id]
-	return h, ok
+// Reset empties every store and retires every entity, keeping registrations.
+// Loading a save wants this rather than a new world, because component handles
+// stay valid across it.
+func (w *World) Reset() {
+	for _, s := range w.stores {
+		s.reset()
+	}
+	for _, set := range w.sets {
+		set.Clear()
+	}
+	w.entities = newEntityAllocator()
+	w.cmdBuf.clear()
+	w.timers.reset()
 }
 
-// --- Table management ---
+// --- Time ---
 
-func (w *World) moveEntityToTable(e Entity, meta *entityMeta, from, to tableID) {
-	if from == to {
-		return
-	}
+// Timers is the wheel entities schedule future wakeups on.
+func (w *World) Timers() *Timers { return w.timers }
 
-	// Remove from old table
-	if from != noLocation && meta.row != noLocation {
-		oldTable := w.tableGraph.get(from)
-		if oldTable != nil {
-			_, swapped := oldTable.remove(meta.row, w.log)
-			if swapped != e {
-				swappedMeta := w.entities.meta(swapped)
-				if swappedMeta != nil {
-					swappedMeta.row = meta.row
-				}
-			}
-		}
-	}
+// Tick is the simulation tick the world has reached.
+func (w *World) Tick() uint64 { return w.timers.Now() }
 
-	// Add to new table
-	newTable := w.tableGraph.get(to)
-	if newTable != nil {
-		newRow := newTable.add(e)
-		meta.tableID = int(to)
-		meta.row = newRow
-	} else {
-		meta.tableID = noLocation
-		meta.row = noLocation
-	}
-}
-
-// --- Queries & Groups ---
-
-// NewQuery returns a Query that iterates entities owning component T.
-func NewQuery[T any](w *World) *Query[T] {
-	return newQuery[T](w)
-}
+// Advance moves the world on one tick and calls fn for every entity whose timer
+// is due. A system driving the world calls this once a step; what fn does is
+// usually to wake the entity in whichever store the system iterates.
+func (w *World) Advance(fn func(e Entity)) { w.timers.Advance(fn) }
 
 // --- Systems ---
 
-func (w *World) RegisterSystem(s System) error {
-	return w.systems.register(s, w.log)
-}
+// RegisterSystem records a system so GetSystem can find it later.
+func (w *World) RegisterSystem(s System) error { return w.systems.register(s, w.log) }
 
-// MustRegisterSystem registers a system. Panics on error. For game code and tests.
+// MustRegisterSystem is RegisterSystem for game code and tests.
 func (w *World) MustRegisterSystem(s System) {
-	if err := w.systems.register(s, w.log); err != nil {
+	if err := w.RegisterSystem(s); err != nil {
 		panic(err)
 	}
 }
 
-func GetSystem[T System](w *World) (T, bool) {
-	return getSystem[T](w.systems)
-}
+// GetSystem returns a registered system by its concrete type.
+func GetSystem[T System](w *World) (T, bool) { return getSystem[T](w.systems) }
 
-// --- Flush ---
+// --- Deferred changes ---
 
-// Flush applies all deferred structural changes.
-func (w *World) Flush() {
-	w.cmdBuf.apply(w)
-}
+// Flush applies everything buffered by the command buffer. A system that
+// creates or destroys entities while iterating buffers the change and the
+// scheduler flushes at a stage boundary, so iteration never sees storage move
+// underneath it.
+func (w *World) Flush() { w.cmdBuf.apply(w) }
 
-// --- Command buffer internal helpers ---
-
-// addComponent is used by the command buffer to create a component instance
-// from raw data and attach it to an entity.
-func (w *World) addComponent(e Entity, componentID ComponentID, data unsafe.Pointer, size uintptr) {
-	if !w.entities.alive(e) {
-		w.log.Warn("addComponent called on dead entity", "entity", e)
-		return
-	}
-
-	info := w.registry.componentInfoFor(componentID)
-	if info == nil {
-		w.log.Error("addComponent for unregistered component", "component_id", componentID)
-		return
-	}
-
-	meta := w.entities.meta(e)
-	if _, has := meta.components[componentID]; has {
-		w.log.Warn("addComponent: entity already has component", "entity", e, "component_id", componentID)
-		return
-	}
-
-	h := w.pool.create(info, data, w.log)
-	w.attachHandle(e, componentID, h)
-}
-
-// removeComponent is used by the command buffer to detach a component from an entity.
-func (w *World) removeComponent(e Entity, componentID ComponentID) {
-	w.detachComponent(e, componentID)
-}
-
-// --- Must* helpers ---
-
-// MustAdd creates a new component instance and attaches it to the entity.
-// Panics on error (unregistered type, dead entity). For game code and tests.
-func MustAdd[T any](w *World, e Entity, c T) {
-	if err := Add[T](w, e, c); err != nil {
-		panic(err)
-	}
-}
-
-// MustRemove detaches a component from the entity.
-// Panics on error. For game code and tests.
-func MustRemove[T any](w *World, e Entity) {
-	if err := Remove[T](w, e); err != nil {
-		panic(err)
-	}
-}
-
-// MustCreate creates a new component instance in the pool.
-// Panics on error (unregistered type). For game code and tests.
-func MustCreate[T any](w *World, c T) Handle {
-	h, err := Create[T](w, c)
-	if err != nil {
-		panic(err)
-	}
-	return h
-}
-
-// MustAttach attaches a component handle to an entity.
-// Panics on error (dead entity, stale handle, unregistered type). For game code and tests.
-func MustAttach[T any](w *World, e Entity, h Handle) {
-	if err := Attach[T](w, e, h); err != nil {
-		panic(err)
-	}
-}
-
-// MustDetach removes a component from an entity.
-// Panics on error (dead entity). For game code and tests.
-func MustDetach[T any](w *World, e Entity) {
-	if err := Detach[T](w, e); err != nil {
-		panic(err)
-	}
-}
+// Commands returns the buffer a system writes deferred changes into.
+func (w *World) Commands() *commandBuffer { return w.cmdBuf }

@@ -11,7 +11,7 @@
 //   - window.Run: raw goGPU vertex drawing (low-level engine render path).
 //   - ui.Run:    widget toolkit driven by desktop.Run (UI shell / HUD path).
 //
-// See documentation.md for the split between the UI shell and the engine
+// See docs/ui.md and docs/window.md for the split between the UI shell and the engine
 // render path.
 package ui
 
