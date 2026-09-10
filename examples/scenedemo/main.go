@@ -13,6 +13,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"image"
 	"math"
 	"time"
 
@@ -25,7 +26,18 @@ import (
 	"github.com/abdallah-elbeheiry/AqwaborEngine/window"
 
 	"github.com/gogpu/gogpu"
+	"github.com/gogpu/gpucontext"
 )
+
+// pixels is the area the damage covers, which is the number worth watching: a
+// frame that changed one machine should not be reporting the whole window.
+func pixels(rects []image.Rectangle) int {
+	n := 0
+	for _, r := range rects {
+		n += r.Dx() * r.Dy()
+	}
+	return n
+}
 
 const spacing = 4 // world units between sprites
 
@@ -104,6 +116,8 @@ func main() {
 
 	var gfx *render.GPU
 	var scene *render.Scene
+	var dmg gpucontext.DamageReporter
+	var rects []image.Rectangle
 	var moving []ecs.Entity
 	var frame int
 	var lastReportFrame int
@@ -140,6 +154,13 @@ func main() {
 		}
 
 		frame++
+
+		if dmg == nil {
+			// One source, registered once. gogpu unions every source at present
+			// time and hands the result to the surface, which is what tells a
+			// compositor how much of the window to recomposite.
+			dmg = dc.RegisterDamageSource("world")
+		}
 
 		if scene == nil {
 			// The device only exists once the run loop has started, so the
@@ -186,6 +207,21 @@ func main() {
 		}
 
 		c, _ := camComp.Get(camE)
+
+		// What changed, in pixels. A rebuilt layer has no particular rectangle,
+		// so the whole surface counts.
+		rects = rects[:0]
+		if scene.Stats().Rebuilt > 0 {
+			dmg.ReportDamage()
+		} else {
+			scale := float32(dc.ScaleFactor())
+			for _, r := range scene.Damaged() {
+				rects = append(rects, render.ScreenRect(r, c.X, c.Y, c.Zoom, vpW, vpH, scale))
+			}
+			rects = render.MergeRects(rects, 16)
+			dmg.ReportDamage(rects...)
+		}
+
 		if err := drawFrame(dc, gfx, scene, c, vpW, vpH, &drawMs, &presentMs); err != nil {
 			return
 		}
@@ -203,6 +239,7 @@ func main() {
 
 			s := scene.Stats()
 			logx.Info("frame",
+				"damage", len(rects), "damagePx", pixels(rects),
 				"fps", float64(frame-lastReportFrame)/since.Seconds(),
 				"syncMs", syncMs, "drawMs", drawMs, "presentMs", presentMs,
 				"written", s.Written, "submitted", s.Submitted, "of", *side**side,

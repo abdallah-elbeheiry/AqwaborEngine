@@ -17,6 +17,9 @@
 package render
 
 import (
+	"image"
+	"math"
+
 	"github.com/gogpu/gogpu"
 	"github.com/gogpu/gputypes"
 	"github.com/gogpu/wgpu"
@@ -31,6 +34,102 @@ type Clear struct {
 type ViewBounds struct {
 	MinX, MinY float32
 	MaxX, MaxY float32
+}
+
+// ScreenRect turns a world rectangle into the pixels it covers, which is what a
+// compositor is told about when only part of a frame changed.
+//
+// The result is in physical pixels with Y running down, the way a surface is
+// addressed, and it is grown outward to whole pixels: a rectangle that covers
+// half a pixel still dirties it.
+func ScreenRect(r ViewBounds, camX, camY, zoom, vpW, vpH, scale float32) image.Rectangle {
+	if zoom <= 0 {
+		zoom = 1
+	}
+	if scale <= 0 {
+		scale = 1
+	}
+	// World Y runs down and so does a surface, so both edges map directly.
+	x0 := (r.MinX-camX)*zoom + vpW/2
+	x1 := (r.MaxX-camX)*zoom + vpW/2
+	y0 := (r.MinY-camY)*zoom + vpH/2
+	y1 := (r.MaxY-camY)*zoom + vpH/2
+
+	return image.Rect(
+		int(math.Floor(float64(x0*scale))),
+		int(math.Floor(float64(y0*scale))),
+		int(math.Ceil(float64(x1*scale))),
+		int(math.Ceil(float64(y1*scale))),
+	)
+}
+
+// MergeRects reduces damage to at most max rectangles by tiling the area they
+// cover and unioning what falls in each tile.
+//
+// A compositor wants a handful of rectangles, not one per moving thing, and
+// unioning the nearest is cheaper than reporting the whole surface: the pixels
+// in a tile's gaps are recomposited, the ones outside it are not. Tiling rather
+// than pairwise merging keeps it linear, which matters when the count is
+// thousands.
+func MergeRects(rects []image.Rectangle, max int) []image.Rectangle {
+	if max < 1 {
+		max = 1
+	}
+	if len(rects) <= max {
+		return rects
+	}
+
+	bounds := rects[0]
+	for _, r := range rects[1:] {
+		bounds = bounds.Union(r)
+	}
+
+	// A square-ish grid of at most max tiles.
+	side := 1
+	for (side+1)*(side+1) <= max {
+		side++
+	}
+	tileW := max2(bounds.Dx()/side, 1)
+	tileH := max2(bounds.Dy()/side, 1)
+
+	tiles := make([]image.Rectangle, side*side)
+	for _, r := range rects {
+		cx := (r.Min.X + r.Dx()/2 - bounds.Min.X) / tileW
+		cy := (r.Min.Y + r.Dy()/2 - bounds.Min.Y) / tileH
+		cx = clamp(cx, 0, side-1)
+		cy = clamp(cy, 0, side-1)
+		i := cy*side + cx
+		if tiles[i].Empty() {
+			tiles[i] = r
+			continue
+		}
+		tiles[i] = tiles[i].Union(r)
+	}
+
+	out := make([]image.Rectangle, 0, side*side)
+	for _, t := range tiles {
+		if !t.Empty() {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+func max2(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func clamp(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
 }
 
 // ViewOf is the world rectangle a camera covers, which is what Scene.Draw takes

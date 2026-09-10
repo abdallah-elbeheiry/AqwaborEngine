@@ -36,6 +36,16 @@ type Scene struct {
 	// partition while emptying it would skip half of them.
 	awake []ecs.Entity
 
+	// damaged is the world rectangles the last Sync wrote into: for each entity
+	// it visited, where it was and where it is. What it is for: telling the
+	// compositor which part of the screen changed, and one day redrawing only
+	// that part.
+	damaged []ViewBounds
+
+	// instances is where each entity was drawn last, which is what makes the
+	// stale half of the damage knowable.
+	instances map[ecs.Entity]ViewBounds
+
 	stats SceneStats
 }
 
@@ -109,10 +119,11 @@ func NewScene(gfx *GPU, w *ecs.World, comps Components, cfg SceneConfig) *Scene 
 	}
 
 	s := &Scene{
-		gfx:     gfx,
-		world:   w,
-		comps:   comps,
-		layerOf: make(map[ecs.Entity]int),
+		gfx:       gfx,
+		world:     w,
+		comps:     comps,
+		layerOf:   make(map[ecs.Entity]int),
+		instances: make(map[ecs.Entity]ViewBounds),
 	}
 	for range cfg.Layers {
 		s.layers = append(s.layers, &sceneLayer{grid: newGrid(cfg.ChunkSize)})
@@ -153,6 +164,10 @@ func (s *Scene) Drop(e ecs.Entity) {
 		s.stats.Written++
 	}
 	delete(s.layerOf, e)
+	if was, ok := s.instances[e]; ok {
+		s.damageRect(was)
+		delete(s.instances, e)
+	}
 }
 
 // Sync writes the awake transforms into the layer buffers and puts them back to
@@ -166,6 +181,7 @@ func (s *Scene) Drop(e ecs.Entity) {
 func (s *Scene) Sync() {
 	s.stats.Written = 0
 	s.stats.Rebuilt = 0
+	s.damaged = s.damaged[:0]
 
 	s.awake = append(s.awake[:0], s.comps.Transform.Owners()...)
 	for _, e := range s.awake {
@@ -274,6 +290,18 @@ func (s *Scene) sync(e ecs.Entity) {
 
 	l := s.layers[li]
 	sx, sy := scaleOf(*t)
+
+	// Damage where it was as well as where it is: the old pixels are as stale
+	// as the new ones are new. The rectangle is the entity's own, not its
+	// chunk's - a chunk is 64 world units and a sprite is a few, so chunk
+	// granularity reported a third of the window for twenty moving sprites.
+	if was, ok := s.instances[e]; ok {
+		s.damageRect(was)
+	}
+	now := ViewBounds{MinX: t.X - sx/2, MinY: t.Y - sy/2, MaxX: t.X + sx/2, MaxY: t.Y + sy/2}
+	s.damageRect(now)
+	s.instances[e] = now
+
 	idx, vacated, freed := l.grid.place(e, t.X, t.Y, sx, sy)
 	s.ensure(li)
 	if freed {
@@ -368,6 +396,17 @@ func (s *Scene) Draw(view ViewBounds) {
 		s.stats.Draws++
 	}
 }
+
+// damageRect records a world rectangle that has to be repainted.
+func (s *Scene) damageRect(r ViewBounds) { s.damaged = append(s.damaged, r) }
+
+// Damaged is the world rectangles the last Sync wrote into, one per chunk. It
+// is what a compositor wants to be told about, and what a partial redraw would
+// have to cover.
+//
+// A rebuilt layer damages nothing in particular, so the whole of it counts:
+// after a Sync that reports Rebuilt, treat the view as damaged entirely.
+func (s *Scene) Damaged() []ViewBounds { return s.damaged }
 
 // Stats is what the last Sync and Draw did.
 func (s *Scene) Stats() SceneStats { return s.stats }

@@ -37,6 +37,9 @@ type Cells struct {
 	seen  []bool
 	all   bool
 
+	// damaged is the world rectangles the last Sync wrote into, one per cell.
+	damaged []ViewBounds
+
 	stats CellStats
 }
 
@@ -166,6 +169,7 @@ func (c *Cells) TouchAll() { c.all = true }
 // PaletteOf to turn a material into the value a cell carries.
 func (c *Cells) Sync(materials []uint32) {
 	c.stats.Written = 0
+	c.damaged = c.damaged[:0]
 	if c.buf == nil || len(materials) < c.w*c.h {
 		if len(materials) < c.w*c.h {
 			log.Error("the materials array is smaller than the grid",
@@ -192,6 +196,21 @@ func (c *Cells) Sync(materials []uint32) {
 	c.clearDirty()
 }
 
+// damage records the world rectangle of the cell itself. A cell is small and a
+// chunk is not, so reporting the chunk would claim a thousand cells changed
+// when one did.
+func (c *Cells) damage(x, y int) {
+	c.damaged = append(c.damaged, ViewBounds{
+		MinX: c.originX + float32(x)*c.size,
+		MinY: c.originY + float32(y)*c.size,
+		MaxX: c.originX + float32(x+1)*c.size,
+		MaxY: c.originY + float32(y+1)*c.size,
+	})
+}
+
+// Damaged is the world rectangles the last Sync wrote into, one per chunk.
+func (c *Cells) Damaged() []ViewBounds { return c.damaged }
+
 func (c *Cells) write(x, y int, palette uint32) {
 	inst := SubcellInstance{
 		X:       c.originX + (float32(x)+0.5)*c.size,
@@ -199,6 +218,7 @@ func (c *Cells) write(x, y int, palette uint32) {
 		Palette: palette,
 	}
 	c.buf.Write(c.slotOf(x, y), &inst)
+	c.damage(x, y)
 	c.stats.Written++
 }
 
