@@ -41,8 +41,13 @@ func ViewProj(c Camera, vpW, vpH float32) [16]float32 {
 	if vpH == 0 {
 		vpH = 1
 	}
+	// World Y runs down the screen, the way a cell grid reads and the way
+	// WorldToLocal already treats it; clip Y runs up. So the Y scale is
+	// negative, and with it the camera's own position lands at clip 0 on both
+	// axes. Without it clip_y worked out as (wy + c.Y) rather than (c.Y - wy),
+	// which put a fitted scene off the top of the screen.
 	sx := zoom * 2 / vpW
-	sy := zoom * 2 / vpH
+	sy := -zoom * 2 / vpH
 	tx := -c.X * zoom * 2 / vpW
 	ty := c.Y * zoom * 2 / vpH
 	return [16]float32{

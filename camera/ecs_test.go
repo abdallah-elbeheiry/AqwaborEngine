@@ -33,8 +33,8 @@ func TestViewProjIdentity(t *testing.T) {
 	if math.Abs(float64(vp[0]-0.02)) > 1e-6 {
 		t.Fatalf("vp[0] = %v, want 0.02", vp[0])
 	}
-	if math.Abs(float64(vp[5]-0.02)) > 1e-6 {
-		t.Fatalf("vp[5] = %v, want 0.02", vp[5])
+	if math.Abs(float64(vp[5]+0.02)) > 1e-6 {
+		t.Fatalf("vp[5] = %v, want -0.02", vp[5])
 	}
 	if vp[12] != 0 || vp[13] != 0 {
 		t.Fatalf("tx,ty = %v,%v, want 0,0", vp[12], vp[13])
@@ -47,7 +47,7 @@ func TestViewProjZoom(t *testing.T) {
 	if math.Abs(float64(vp[0]-0.005)) > 1e-6 {
 		t.Fatalf("vp[0] = %v, want 0.005", vp[0])
 	}
-	syWant := float32(2) * 2 / 600
+	syWant := float32(-2) * 2 / 600
 	if math.Abs(float64(vp[5]-syWant)) > 1e-6 {
 		t.Fatalf("vp[5] = %v, want %v", vp[5], syWant)
 	}
@@ -69,7 +69,7 @@ func TestViewProjTranslation(t *testing.T) {
 func TestViewProjZeroViewport(t *testing.T) {
 	c := Camera{Zoom: 1}
 	vp := ViewProj(c, 0, 0)
-	if vp[0] != 2 || vp[5] != 2 {
+	if vp[0] != 2 || vp[5] != -2 {
 		t.Fatalf("zero viewport should fallback to 1: got sx=%v sy=%v", vp[0], vp[5])
 	}
 }
@@ -157,5 +157,47 @@ func TestClampToBounds(t *testing.T) {
 	c.ClampToBounds(1000, 1000, 800, 600)
 	if c.X != 500 || c.Y != 500 {
 		t.Fatalf("expected centering when viewport > world, got (%v, %v)", c.X, c.Y)
+	}
+}
+
+// clipOf projects a world point through the matrix ViewProj builds. The matrix is
+// column-major and the projection is orthographic, so w is 1 and the two axes are
+// independent.
+func clipOf(vp [16]float32, wx, wy float32) (float32, float32) {
+	return wx*vp[0] + vp[12], wy*vp[5] + vp[13]
+}
+
+func TestViewProjPutsCameraAtCentre(t *testing.T) {
+	c := Camera{X: 26, Y: 17, Zoom: 29.41}
+	vp := ViewProj(c, 1600, 1000)
+
+	cx, cy := clipOf(vp, c.X, c.Y)
+	if math.Abs(float64(cx)) > 1e-5 || math.Abs(float64(cy)) > 1e-5 {
+		t.Fatalf("camera lands at clip %v,%v, want 0,0", cx, cy)
+	}
+}
+
+func TestViewProjWorldYRunsDown(t *testing.T) {
+	c := Camera{X: 0, Y: 0, Zoom: 1}
+	vp := ViewProj(c, 800, 600)
+
+	_, above := clipOf(vp, 0, -10)
+	_, below := clipOf(vp, 0, 10)
+	if !(below < above) {
+		t.Fatalf("clip Y below the camera = %v, above = %v; world Y runs down, so below must be smaller", below, above)
+	}
+}
+
+func TestViewProjFittedWorldIsOnScreen(t *testing.T) {
+	c := Camera{MinZoom: 0.01, MaxZoom: 1000}
+	c.Fit(52, 34, 1600, 1000)
+	c.X, c.Y = 26, 17
+	vp := ViewProj(c, 1600, 1000)
+
+	for _, p := range [][2]float32{{0, 0}, {52, 0}, {0, 34}, {52, 34}} {
+		x, y := clipOf(vp, p[0], p[1])
+		if x < -1.0001 || x > 1.0001 || y < -1.0001 || y > 1.0001 {
+			t.Fatalf("corner %v lands at clip %v,%v, outside -1..1", p, x, y)
+		}
 	}
 }

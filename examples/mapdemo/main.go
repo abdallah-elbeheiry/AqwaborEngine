@@ -93,7 +93,10 @@ func runWorldDemo() {
 		if !ok {
 			return
 		}
-		c.Pan(float32(dx), float32(dy))
+		// Pan is written for a world whose Y runs down the screen. This one runs
+		// up, so the drag is handed the opposite sign and the map follows the
+		// cursor rather than fighting it.
+		c.Pan(float32(dx), -float32(dy))
 	})
 
 	zoomInAction := mgr.Action("zoom_in")
@@ -216,7 +219,7 @@ func runWorldDemo() {
 			}
 
 			// Build GPU resources.
-			mapPipe = maprender.NewMapPipeline(gfx.Device(), gfx.SurfaceFormat())
+			mapPipe = maprender.NewMapPipeline(gfx.Device(), gfx.SurfaceFormat(), gfx.CameraLayout())
 			mapMesh = maprender.BuildMapMesh(gfx.Device(), fillGeoms, passes, maprender.MapMeshConfig{})
 			strokeBuf, _ = maprender.BuildMapStrokes(gfx.Device(), strokeGeoms, 1.5, 0.75)
 		}
@@ -247,8 +250,10 @@ func runWorldDemo() {
 		}); err != nil {
 			return
 		}
+		// One SetCamera covers the map pipeline too: it was built against the
+		// engine's camera layout, so it reads the same buffer the sprite and
+		// stroke pipelines do.
 		gfx.SetCamera(vpMat, float32(vp.Width), float32(vp.Height))
-		mapPipe.UpdateCamera(gfx.Queue(), vpMat, float32(vp.Width), float32(vp.Height))
 
 		// Draw fills via the generic vertex draw.
 		maxRank := maprender.RankForZoom(cam.Zoom)
@@ -260,7 +265,6 @@ func runWorldDemo() {
 				}
 				gfx.DrawVerticesRange(
 					mapPipe.Pipeline(),
-					mapPipe.BindGroup(),
 					mapMesh.Buffer,
 					count,
 					pass.Offset,
@@ -283,6 +287,13 @@ func runWorldDemo() {
 
 // viewProjMap builds a column-major 4x4 orthographic view-projection matrix
 // from a Camera component, viewport size, and world scale.
+//
+// It exists instead of camera.ViewProj for two reasons. The map's coordinates
+// are degrees times a scale, so the matrix folds that divisor in; and latitude
+// runs up, unlike the engine's default of world Y running down the screen. Y up
+// means the scale stays positive and the translation is negated, which is the
+// mirror of what camera.ViewProj does. Either way the camera's own position has
+// to land at clip 0.
 func viewProjMap(c camera.Camera, viewW, viewH, worldScale float32) [16]float32 {
 	if worldScale == 0 {
 		worldScale = 1
@@ -303,7 +314,7 @@ func viewProjMap(c camera.Camera, viewW, viewH, worldScale float32) [16]float32 
 	sx := zoom * 2 / vpW / worldScale
 	sy := zoom * 2 / vpH / worldScale
 	tx := -c.X * zoom * 2 / vpW
-	ty := c.Y * zoom * 2 / vpH
+	ty := -c.Y * zoom * 2 / vpH
 
 	return [16]float32{
 		sx, 0, 0, 0,
