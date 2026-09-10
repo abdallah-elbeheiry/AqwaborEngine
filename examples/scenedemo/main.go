@@ -26,17 +26,18 @@ import (
 	"github.com/gogpu/gogpu"
 )
 
-const (
-	side    = 100 // sprites a side
-	spacing = 4   // world units between them
-	movers  = 64  // how many of them move
-)
+const spacing = 4 // world units between sprites
 
 func main() {
 	logx.Init(logx.WithColor(true), logx.WithLevel(logx.InfoLevel))
+	defer logx.Info("keys: E/Q or =/- zoom, WASD or arrows pan")
 	frames := flag.Int("frames", 0, "exit after this many frames; 0 runs until the window closes")
 	zoom := flag.Float64("zoom", 2, "camera zoom to start at; a high one shows the chunk cull cutting work")
 	mode := flag.String("mode", "scene", "scene (chunks + GPU cull), range (chunks, no cull), whole (one draw, no cull)")
+	side := flag.Int("side", 100, "sprites a side; the field is this squared")
+	movers := flag.Int("movers", 64, "how many of them move every frame")
+	chunk := flag.Float64("chunk", 64, "chunk side in world units")
+	spread := flag.Bool("spread", true, "spread the movers over the field; false puts them together")
 	flag.Parse()
 
 	win, err := window.NewWindow(window.WindowConfig{
@@ -59,7 +60,7 @@ func main() {
 	camComp.Set(camE, camera.Camera{Zoom: float32(*zoom), MinZoom: 0.05, MaxZoom: 50, Active: 1})
 	camComp.Wake(camE)
 	cam, _ := camComp.Get(camE)
-	cam.X, cam.Y = side*spacing/2, side*spacing/2
+	cam.X, cam.Y = float32(*side*spacing)/2, float32(*side*spacing)/2
 
 	mgr := input.NewManager(gogpuinput.NewBackend(win.App()))
 	bind := func(name string, key input.Key, fn func(*camera.Camera)) {
@@ -71,17 +72,35 @@ func main() {
 			}
 		})
 	}
-	bind("zoom_in", input.KeyEqual, func(c *camera.Camera) { c.Zoom *= 1.1; camera.ClampZoom(c) })
-	bind("zoom_out", input.KeyMinus, func(c *camera.Camera) { c.Zoom /= 1.1; camera.ClampZoom(c) })
-	bind("left", input.KeyA, func(c *camera.Camera) { c.X -= 8 })
-	bind("right", input.KeyD, func(c *camera.Camera) { c.X += 8 })
-	bind("up", input.KeyW, func(c *camera.Camera) { c.Y -= 8 })
-	bind("down", input.KeyS, func(c *camera.Camera) { c.Y += 8 })
+	zoomIn := func(c *camera.Camera) { c.Zoom *= 1.1; camera.ClampZoom(c) }
+	zoomOut := func(c *camera.Camera) { c.Zoom /= 1.1; camera.ClampZoom(c) }
+
+	// Q and E as well as = and -, because = is not a key of its own on a German
+	// ISO layout and - is not where the ANSI code expects it. Letters and arrows
+	// are in the same place on every layout worth supporting.
+	bind("zoom_in", input.KeyE, zoomIn)
+	bind("zoom_out", input.KeyQ, zoomOut)
+	bind("zoom_in_ansi", input.KeyEqual, zoomIn)
+	bind("zoom_out_ansi", input.KeyMinus, zoomOut)
+
+	panBy := func(dx, dy float32) func(*camera.Camera) {
+		return func(c *camera.Camera) { c.X += dx; c.Y += dy }
+	}
+	bind("left", input.KeyA, panBy(-16, 0))
+	bind("right", input.KeyD, panBy(16, 0))
+	bind("up", input.KeyW, panBy(0, -16))
+	bind("down", input.KeyS, panBy(0, 16))
+	bind("left_arrow", input.KeyLeft, panBy(-16, 0))
+	bind("right_arrow", input.KeyRight, panBy(16, 0))
+	bind("up_arrow", input.KeyUp, panBy(0, -16))
+	bind("down_arrow", input.KeyDown, panBy(0, 16))
 
 	var scene *render.Scene
 	var moving []ecs.Entity
 	var frame int
+	var lastReportFrame int
 	var reported time.Time
+	var syncMs, drawMs, presentMs float64
 	last := time.Now()
 
 	err = win.Run(func(dc *gogpu.Context) {
@@ -94,7 +113,7 @@ func main() {
 			// The device only exists once the run loop has started, so the
 			// scene is built here rather than above.
 			gfx := render.New(win.DeviceProvider())
-			cfg := render.SceneConfig{ChunkSize: 64}
+			cfg := render.SceneConfig{ChunkSize: float32(*chunk)}
 			switch *mode {
 			case "range":
 				cfg.CullFrom = 1 << 30
@@ -102,13 +121,20 @@ func main() {
 				cfg.CullFrom = 1 << 30
 				cfg.MaxRuns = 1
 			}
-			logx.Info("drawing", "mode", *mode)
+			logx.Info("drawing", "mode", *mode, "sprites", *side**side, "movers", *movers, "chunk", *chunk)
 			scene = render.NewScene(gfx, w, comps, cfg)
 			defer func() { reported = time.Now() }()
 
-			for y := range side {
-				for x := range side {
-					shade := float32(x+y) / float32(2*side)
+			// Spread the movers over the field rather than clustering them in
+			// the first chunks, so the cost they cause is spread too.
+			stride := max(1, *side**side/max(*movers, 1))
+			if !*spread {
+				stride = 1
+			}
+
+			for y := range *side {
+				for x := range *side {
+					shade := float32(x+y) / float32(2**side)
 					e := scene.Spawn(
 						render.Transform{
 							X: float32(x * spacing), Y: float32(y * spacing),
@@ -117,7 +143,7 @@ func main() {
 						render.Color{R: shade, G: 0.4, B: 1 - shade, A: 1},
 						render.Sprite{},
 					)
-					if len(moving) < movers && (x+y)%37 == 0 {
+					if len(moving) < *movers && (y**side+x)%stride == 0 {
 						moving = append(moving, e)
 					}
 				}
@@ -136,20 +162,24 @@ func main() {
 			tr.Y += float32(math.Sin(t+float64(i)) * 0.6)
 			scene.Touch(e)
 		}
+		syncStart := time.Now()
 		scene.Sync()
+		syncMs = time.Since(syncStart).Seconds() * 1000
 
 		c, _ := camComp.Get(camE)
-		if err := gfxBegin(dc, scene, c, vpW, vpH); err != nil {
+		if err := gfxBegin(dc, scene, c, vpW, vpH, &drawMs, &presentMs); err != nil {
 			return
 		}
 
-		if time.Since(reported) > time.Second {
+		if since := time.Since(reported); since > time.Second {
 			s := scene.Stats()
 			logx.Info("frame",
-				"written", s.Written, "rebuilt", s.Rebuilt,
-				"submitted", s.Submitted, "of", side*side,
-				"draws", s.Draws, "zoom", c.Zoom)
+				"fps", float64(frame-lastReportFrame)/since.Seconds(),
+				"syncMs", syncMs, "drawMs", drawMs, "presentMs", presentMs,
+				"written", s.Written, "submitted", s.Submitted, "of", *side**side,
+				"draws", s.Draws, "rebuilt", s.Rebuilt, "zoom", c.Zoom)
 			reported = time.Now()
+			lastReportFrame = frame
 		}
 
 		if *frames > 0 && frame >= *frames {
@@ -164,11 +194,19 @@ func main() {
 // gfxBegin runs one frame: clear, camera, scene, present. The view the scene is
 // given is the world rectangle the camera covers, which is what decides the
 // chunks worth drawing.
-func gfxBegin(dc *gogpu.Context, scene *render.Scene, c *camera.Camera, vpW, vpH float32) error {
+func gfxBegin(dc *gogpu.Context, scene *render.Scene, c *camera.Camera, vpW, vpH float32, drawMs, presentMs *float64) error {
 	gfx := scene.GPU()
+
+	// Begin acquires the drawable, so on a vsync display this is the wait for
+	// the screen rather than any cost of drawing. Timed apart for that reason.
+	start := time.Now()
 	if err := gfx.Begin(dc, render.Clear{R: 0.04, G: 0.05, B: 0.08, A: 1}); err != nil {
 		return err
 	}
+	acquire := time.Since(start)
+	_ = acquire
+
+	start = time.Now()
 	gfx.SetCamera(camera.ViewProj(*c, vpW, vpH), vpW, vpH)
 
 	halfW := vpW / (2 * c.Zoom)
@@ -178,6 +216,10 @@ func gfxBegin(dc *gogpu.Context, scene *render.Scene, c *camera.Camera, vpW, vpH
 		MinY: c.Y - halfH, MaxY: c.Y + halfH,
 	})
 
+	*drawMs = time.Since(start).Seconds() * 1000
+
+	start = time.Now()
 	gfx.End()
+	*presentMs = time.Since(start).Seconds() * 1000
 	return nil
 }
