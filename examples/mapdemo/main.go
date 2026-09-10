@@ -149,7 +149,6 @@ func runWorldDemo() {
 		if w, h := dc.Size(); w > 0 && h > 0 {
 			vpW, vpH = float32(w), float32(h)
 		}
-		win.WatchScale(dc.ScaleFactor())
 
 		now := time.Now()
 		dt := now.Sub(lastFrame).Seconds()

@@ -69,18 +69,6 @@ func (w *Window) Size() (width, height int) {
 	return w.app.Size()
 }
 
-// FramebufferSize is the surface in physical pixels, which is what a render
-// pass covers: Size times ScaleFactor. During a frame the context's own
-// FramebufferSize is the authority, because it is the drawable being written.
-func (w *Window) FramebufferSize() (width, height int) {
-	lw, lh := w.Size()
-	s := w.ScaleFactor()
-	if s <= 0 {
-		s = 1
-	}
-	return int(float64(lw) * s), int(float64(lh) * s)
-}
-
 // ScaleFactor is physical pixels per logical pixel, and it changes when the
 // window moves between displays.
 func (w *Window) ScaleFactor() float64 {
@@ -90,8 +78,9 @@ func (w *Window) ScaleFactor() float64 {
 	return w.app.ScaleFactor()
 }
 
-// WatchScale nudges the surface back into step when the window moves to a
-// display with a different backing scale.
+// watchScale nudges the surface back into step when the window moves to a
+// display with a different backing scale. Run calls it every frame; it is not a
+// caller's job, because it is not a feature.
 //
 // gogpu 0.53.0 records EventScaleChanged and asks for a redraw, but does not
 // resize the GPU surface the way every other size path does (app.go, the
@@ -100,11 +89,10 @@ func (w *Window) ScaleFactor() float64 {
 // into a drawable larger than the one being presented, and what the window
 // shows is the top-left corner of it.
 //
-// Call this once a frame with the frame's own scale factor. It requests the
-// size the window already has, which is what makes the surface follow.
-//
-// Remove it when gogpu resizes the surface on a scale change.
-func (w *Window) WatchScale(scale float64) {
+// It requests the size the window already has, which is what makes the surface
+// follow. Remove it, and its call in Run, when gogpu resizes the surface on a
+// scale change.
+func (w *Window) watchScale(scale float64) {
 	if w.app == nil || scale <= 0 {
 		return
 	}
@@ -147,8 +135,7 @@ func (w *Window) Run(onDraw func(dc *gogpu.Context)) error {
 		return nil
 	}
 	wrapped := func(dc *gogpu.Context) {
-		w.mu.Lock()
-		w.mu.Unlock()
+		w.watchScale(dc.ScaleFactor())
 		log.Trace("frame begin")
 		onDraw(dc)
 		log.Trace("frame end")

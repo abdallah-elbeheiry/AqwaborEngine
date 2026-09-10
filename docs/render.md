@@ -222,7 +222,7 @@ and it is not recoverable from the world afterwards.
 ### Scene
 
 ```go
-scene := render.NewScene(gfx, w, comps, render.SceneConfig{ChunkSize: 64})
+scene := render.NewScene(gfx, w, comps, render.SceneConfig{ChunkSize: 64, Layers: 1})
 
 e := scene.Spawn(
     render.Transform{X: 100, Y: 200, SX: 48, SY: 48},
@@ -234,7 +234,7 @@ e := scene.Spawn(
 scene.Sync()                 // write what changed
 gfx.Begin(dc, clear)
 gfx.SetCamera(camera.ViewProj(*cam, vpW, vpH), vpW, vpH)
-scene.Draw(view)             // culls first, then draws; call between Begin and End
+scene.Draw(render.ViewOf(cam.X, cam.Y, cam.Zoom, vpW, vpH))
 gfx.End()
 ```
 

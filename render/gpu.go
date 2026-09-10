@@ -33,6 +33,23 @@ type ViewBounds struct {
 	MaxX, MaxY float32
 }
 
+// ViewOf is the world rectangle a camera covers, which is what Scene.Draw takes
+// and what the cull tests against. It is here because otherwise every game
+// writes the same four lines of arithmetic.
+//
+//	scene.Draw(render.ViewOf(cam.X, cam.Y, cam.Zoom, vpW, vpH))
+func ViewOf(camX, camY, zoom, vpW, vpH float32) ViewBounds {
+	if zoom <= 0 {
+		zoom = 1
+	}
+	halfW := vpW / (2 * zoom)
+	halfH := vpH / (2 * zoom)
+	return ViewBounds{
+		MinX: camX - halfW, MaxX: camX + halfW,
+		MinY: camY - halfH, MaxY: camY + halfH,
+	}
+}
+
 // GPU is the public facade over the render submission layer. It owns the
 // per-frame render pass, the pipelines and the resources.
 //

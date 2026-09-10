@@ -34,7 +34,6 @@ func main() {
 	defer logx.Info("keys: E/Q or =/- zoom, WASD or arrows pan")
 	frames := flag.Int("frames", 0, "exit after this many frames; 0 runs until the window closes")
 	zoom := flag.Float64("zoom", 2, "camera zoom to start at; a high one shows the chunk cull cutting work")
-	mode := flag.String("mode", "scene", "scene (chunks + GPU cull), range (chunks, no cull), whole (one draw, no cull)")
 	side := flag.Int("side", 100, "sprites a side; the field is this squared")
 	movers := flag.Int("movers", 64, "how many of them move every frame")
 	chunk := flag.Float64("chunk", 64, "chunk side in world units")
@@ -103,6 +102,7 @@ func main() {
 	bind("up_arrow", input.KeyUp, panBy(0, -16))
 	bind("down_arrow", input.KeyDown, panBy(0, 16))
 
+	var gfx *render.GPU
 	var scene *render.Scene
 	var moving []ecs.Entity
 	var frame int
@@ -138,24 +138,15 @@ func main() {
 		if w, h := dc.Size(); w > 0 && h > 0 {
 			vpW, vpH = float32(w), float32(h)
 		}
-		win.WatchScale(dc.ScaleFactor())
 
 		frame++
 
 		if scene == nil {
 			// The device only exists once the run loop has started, so the
 			// scene is built here rather than above.
-			gfx := render.New(win.DeviceProvider())
-			cfg := render.SceneConfig{ChunkSize: float32(*chunk)}
-			switch *mode {
-			case "range":
-				cfg.CullFrom = 1 << 30
-			case "whole":
-				cfg.CullFrom = 1 << 30
-				cfg.MaxRuns = 1
-			}
-			logx.Info("drawing", "mode", *mode, "sprites", *side**side, "movers", *movers, "chunk", *chunk)
-			scene = render.NewScene(gfx, w, comps, cfg)
+			gfx = render.New(win.DeviceProvider())
+			logx.Info("drawing", "sprites", *side**side, "movers", *movers, "chunk", *chunk)
+			scene = render.NewScene(gfx, w, comps, render.SceneConfig{ChunkSize: float32(*chunk)})
 			defer func() { reported = time.Now() }()
 
 			// Spread the movers over the field rather than clustering them in
@@ -195,7 +186,7 @@ func main() {
 		}
 
 		c, _ := camComp.Get(camE)
-		if err := gfxBegin(dc, scene, c, vpW, vpH, &drawMs, &presentMs); err != nil {
+		if err := drawFrame(dc, gfx, scene, c, vpW, vpH, &drawMs, &presentMs); err != nil {
 			return
 		}
 
@@ -229,11 +220,8 @@ func main() {
 	}
 }
 
-// gfxBegin runs one frame: clear, camera, scene, present. The view the scene is
-// given is the world rectangle the camera covers, which is what decides the
-// chunks worth drawing.
-func gfxBegin(dc *gogpu.Context, scene *render.Scene, c *camera.Camera, vpW, vpH float32, drawMs, presentMs *float64) error {
-	gfx := scene.GPU()
+// drawFrame runs one frame: clear, camera, scene, present.
+func drawFrame(dc *gogpu.Context, gfx *render.GPU, scene *render.Scene, c *camera.Camera, vpW, vpH float32, drawMs, presentMs *float64) error {
 
 	// Begin acquires the drawable, so on a vsync display this is the wait for
 	// the screen rather than any cost of drawing. Timed apart for that reason.
@@ -247,12 +235,7 @@ func gfxBegin(dc *gogpu.Context, scene *render.Scene, c *camera.Camera, vpW, vpH
 	start = time.Now()
 	gfx.SetCamera(camera.ViewProj(*c, vpW, vpH), vpW, vpH)
 
-	halfW := vpW / (2 * c.Zoom)
-	halfH := vpH / (2 * c.Zoom)
-	scene.Draw(render.ViewBounds{
-		MinX: c.X - halfW, MaxX: c.X + halfW,
-		MinY: c.Y - halfH, MaxY: c.Y + halfH,
-	})
+	scene.Draw(render.ViewOf(c.X, c.Y, c.Zoom, vpW, vpH))
 
 	*drawMs = time.Since(start).Seconds() * 1000
 

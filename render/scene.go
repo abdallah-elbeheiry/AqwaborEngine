@@ -36,9 +36,7 @@ type Scene struct {
 	// partition while emptying it would skip half of them.
 	awake []ecs.Entity
 
-	cullFrom int
-	maxRuns  int
-	stats    SceneStats
+	stats SceneStats
 }
 
 // SceneConfig is what a scene needs to know that it cannot work out.
@@ -51,18 +49,12 @@ type SceneConfig struct {
 	// Layers is how many draw buckets there are. An entity's bucket is its
 	// Sprite.Layer, clamped. Defaults to 1.
 	Layers int
-
-	// CullFrom is the instance count from which a range is worth culling on
-	// the GPU rather than drawn as it stands. Defaults to 64. A number larger
-	// than the world turns the GPU cull off and leaves the chunking.
-	CullFrom int
-
-	// MaxRuns is how many ranges a layer may draw in a frame. Runs past it are
-	// joined, which draws the gap between them as well. Defaults to the cull's
-	// slot count, which is what bounds it in practice. One run means the whole
-	// layer in a single draw.
-	MaxRuns int
 }
+
+// cullFrom is the instance count from which a range is worth culling on the GPU
+// rather than drawn as it stands. Below it the dispatch costs more than the
+// instances it would drop.
+const cullFrom = 64
 
 // SceneStats is what the last frame did, which is what a change to the scene is
 // argued with.
@@ -106,20 +98,12 @@ func NewScene(gfx *GPU, w *ecs.World, comps Components, cfg SceneConfig) *Scene 
 	if cfg.Layers < 1 {
 		cfg.Layers = 1
 	}
-	if cfg.CullFrom <= 0 {
-		cfg.CullFrom = 64
-	}
-	if cfg.MaxRuns <= 0 {
-		cfg.MaxRuns = cullSlots
-	}
 
 	s := &Scene{
-		gfx:      gfx,
-		world:    w,
-		comps:    comps,
-		layerOf:  make(map[ecs.Entity]int),
-		cullFrom: cfg.CullFrom,
-		maxRuns:  cfg.MaxRuns,
+		gfx:     gfx,
+		world:   w,
+		comps:   comps,
+		layerOf: make(map[ecs.Entity]int),
 	}
 	for range cfg.Layers {
 		s.layers = append(s.layers, &sceneLayer{grid: newGrid(cfg.ChunkSize)})
@@ -345,16 +329,16 @@ func (s *Scene) Draw(view ViewBounds) {
 		direct instRange
 	}
 
-	slots := min(cullSlots, s.maxRuns)
+	slots := cullSlots
 	var plan []submission
 
 	for li, l := range s.layers {
 		if l.batch == nil || l.grid.total == 0 {
 			continue
 		}
-		for _, r := range l.grid.visible(view, s.maxRuns) {
+		for _, r := range l.grid.visible(view, cullSlots) {
 			s.stats.Submitted += r.Count
-			if r.Count >= s.cullFrom && slots > 0 {
+			if r.Count >= cullFrom && slots > 0 {
 				c := s.gfx.CullSpritesRange(l.batch, r.First, r.Count, view)
 				if c.ok {
 					slots--
@@ -378,11 +362,6 @@ func (s *Scene) Draw(view ViewBounds) {
 
 // Stats is what the last Sync and Draw did.
 func (s *Scene) Stats() SceneStats { return s.stats }
-
-// GPU is the facade the scene draws through, for the frame around it: Begin,
-// SetCamera and End are the caller's, because a frame may hold more than one
-// scene.
-func (s *Scene) GPU() *GPU { return s.gfx }
 
 // Release frees the layer buffers.
 func (s *Scene) Release() {
