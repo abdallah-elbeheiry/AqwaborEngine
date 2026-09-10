@@ -1,1006 +1,571 @@
 package ecs
 
 import (
+	"math/rand"
 	"testing"
+
+	"github.com/abdallah-elbeheiry/AqwaborEngine/logx"
 )
 
-// Test component types
-type Position struct {
-	X, Y float64
+type Position struct{ X, Y float64 }
+type Velocity struct{ X, Y float64 }
+type Heat struct{ Kelvin int32 }
+
+// Tag carries no fields. A zero-size component used to crash on registration
+// because storage indexed an empty allocation.
+type Tag struct{}
+
+func newTestWorld(tb testing.TB) *World {
+	tb.Helper()
+	logx.Discard()
+	return NewWorld()
 }
 
-type Velocity struct {
-	DX, DY float64
-}
+func TestEntityLifetime(t *testing.T) {
+	w := newTestWorld(t)
 
-type Health struct {
-	Current, Max int
-}
-
-// --- Registration ---
-
-func TestRegister(t *testing.T) {
-	w := NewWorld()
-	Register[Position](w)
-	Register[Velocity](w)
-	Register[Health](w)
-	Register[Position](w) // idempotent
-}
-
-func TestRegisterUnregistered(t *testing.T) {
-	w := NewWorld()
-	e := w.Create()
-
-	err := Add[Position](w, e, Position{X: 1})
-	if err == nil {
-		t.Fatal("expected error adding unregistered component")
-	}
-}
-
-// --- Entity lifecycle ---
-
-func TestCreateEntity(t *testing.T) {
-	w := NewWorld()
 	e := w.Create()
 	if !w.Alive(e) {
-		t.Fatal("entity should be alive")
+		t.Fatal("new entity is not alive")
 	}
-}
-
-func TestDestroyEntity(t *testing.T) {
-	w := NewWorld()
-	e := w.Create()
-	w.Destroy(e, false)
+	if w.Count() != 1 {
+		t.Fatalf("count = %d, want 1", w.Count())
+	}
+	if !w.Destroy(e) {
+		t.Fatal("destroy reported nothing to do")
+	}
 	if w.Alive(e) {
-		t.Fatal("entity should be dead")
+		t.Fatal("destroyed entity is still alive")
+	}
+	if w.Count() != 0 {
+		t.Fatalf("count = %d, want 0", w.Count())
+	}
+	if w.Destroy(e) {
+		t.Fatal("destroying twice reported success the second time")
 	}
 }
 
-func TestDestroyAlreadyDead(t *testing.T) {
-	w := NewWorld()
-	e := w.Create()
-	w.Destroy(e, false)
-	w.Destroy(e, false)
-}
+// A recycled index must not let a handle to the previous occupant reach the new
+// one. Every accessor is checked, because the old implementation checked the
+// generation in Alive and nowhere else, so a stale handle could destroy a live
+// entity.
+func TestStaleHandleReachesNothing(t *testing.T) {
+	w := newTestWorld(t)
+	pos := MustRegister[Position](w)
 
-func TestDestroyWithCascade(t *testing.T) {
-	w := NewWorld()
-	Register[Position](w)
-	e := w.Create()
-	MustAdd[Position](w, e, Position{X: 1, Y: 2})
-	w.Destroy(e, true)
-	if w.Alive(e) {
-		t.Fatal("entity should be dead")
+	first := w.Create()
+	pos.Set(first, Position{X: 1})
+	w.Destroy(first)
+
+	second := w.Create()
+	pos.Set(second, Position{X: 2})
+
+	if first.Index() != second.Index() {
+		t.Fatalf("test needs the index reused: first %d, second %d", first.Index(), second.Index())
 	}
-}
-
-// --- Add / Get / Has / Remove ---
-
-func TestAddGetHas(t *testing.T) {
-	w := NewWorld()
-	Register[Position](w)
-
-	e := w.Create()
-	MustAdd[Position](w, e, Position{X: 3, Y: 4})
-	if !Has[Position](w, e) {
-		t.Fatal("entity should have Position")
-	}
-	pos, ok := Get[Position](w, e)
-	if !ok {
-		t.Fatal("Get Position failed")
-	}
-	if pos.X != 3 || pos.Y != 4 {
-		t.Fatalf("expected (3,4), got (%v,%v)", pos.X, pos.Y)
-	}
-}
-
-func TestAddMultipleComponents(t *testing.T) {
-	w := NewWorld()
-	Register[Position](w)
-	Register[Velocity](w)
-	Register[Health](w)
-
-	e := w.Create()
-	MustAdd[Position](w, e, Position{X: 1, Y: 2})
-	MustAdd[Velocity](w, e, Velocity{DX: 0.1, DY: 0.2})
-	MustAdd[Health](w, e, Health{Current: 100, Max: 100})
-
-	if !Has[Position](w, e) {
-		t.Fatal("missing Position")
-	}
-	if !Has[Velocity](w, e) {
-		t.Fatal("missing Velocity")
-	}
-	if !Has[Health](w, e) {
-		t.Fatal("missing Health")
+	if first == second {
+		t.Fatal("recycled entity has the same handle, so the generation did not move")
 	}
 
-	pos, _ := Get[Position](w, e)
-	if pos.X != 1 {
-		t.Fatal("wrong Position")
+	if w.Alive(first) {
+		t.Error("Alive accepted a stale handle")
 	}
-	vel, _ := Get[Velocity](w, e)
-	if vel.DX != 0.1 {
-		t.Fatal("wrong Velocity")
+	if pos.Has(first) {
+		t.Error("Has accepted a stale handle")
 	}
-	hp, _ := Get[Health](w, e)
-	if hp.Current != 100 {
-		t.Fatal("wrong Health")
+	if _, ok := pos.Get(first); ok {
+		t.Error("Get accepted a stale handle")
+	}
+	if pos.Set(first, Position{X: 99}) {
+		t.Error("Set accepted a stale handle")
+	}
+	if pos.Remove(first) {
+		t.Error("Remove accepted a stale handle")
+	}
+	if pos.Wake(first) {
+		t.Error("Wake accepted a stale handle")
+	}
+	if w.Destroy(first) {
+		t.Error("Destroy accepted a stale handle")
+	}
+
+	if !w.Alive(second) {
+		t.Fatal("the live entity was collateral damage")
+	}
+	v, ok := pos.Get(second)
+	if !ok || v.X != 2 {
+		t.Fatalf("live entity value = %+v ok=%v, want X=2", v, ok)
 	}
 }
 
-func TestAddDuplicateIgnored(t *testing.T) {
-	w := NewWorld()
-	Register[Position](w)
+func TestZeroSizeComponent(t *testing.T) {
+	w := newTestWorld(t)
+	tag := MustRegister[Tag](w)
 
 	e := w.Create()
-	MustAdd[Position](w, e, Position{X: 1, Y: 2})
-	MustAdd[Position](w, e, Position{X: 99, Y: 99})
+	if !tag.Set(e, Tag{}) {
+		t.Fatal("could not set a zero-size component")
+	}
+	if !tag.Has(e) {
+		t.Fatal("zero-size component did not stick")
+	}
+	tag.Wake(e)
 
-	pos, _ := Get[Position](w, e)
-	if pos.X != 1 || pos.Y != 2 {
-		t.Fatal("second Add should be ignored")
+	seen := 0
+	tag.Each(func(Entity, *Tag) { seen++ })
+	if seen != 1 {
+		t.Fatalf("iterated %d zero-size components, want 1", seen)
+	}
+	if !tag.Remove(e) {
+		t.Fatal("could not remove a zero-size component")
 	}
 }
 
-func TestHasDeadEntity(t *testing.T) {
-	w := NewWorld()
-	Register[Position](w)
+// Set replaces. The old Add warned and kept the original, so a caller asking to
+// overwrite silently got the value it was replacing.
+func TestSetOverwrites(t *testing.T) {
+	w := newTestWorld(t)
+	pos := MustRegister[Position](w)
 
 	e := w.Create()
-	w.Destroy(e, false)
-	if Has[Position](w, e) {
-		t.Fatal("Has on dead entity should return false")
+	pos.Set(e, Position{X: 1})
+	pos.Set(e, Position{X: 2})
+
+	v, _ := pos.Get(e)
+	if v.X != 2 {
+		t.Fatalf("X = %v after overwrite, want 2", v.X)
+	}
+	if pos.Len() != 1 {
+		t.Fatalf("overwrite added a second row: len = %d", pos.Len())
 	}
 }
 
-func TestGetDeadEntity(t *testing.T) {
-	w := NewWorld()
-	Register[Position](w)
+func TestPointerComponentsRejected(t *testing.T) {
+	w := newTestWorld(t)
+
+	type WithSlice struct{ Parts []int }
+	type WithString struct{ Name string }
+	type WithPointer struct{ Next *Position }
+	type WithMap struct{ M map[int]int }
+	type Nested struct{ Inner WithSlice }
+	type WithArrayOfBad struct{ Arr [4]WithString }
+
+	if _, err := Register[WithSlice](w); err == nil {
+		t.Error("a slice field registered")
+	}
+	if _, err := Register[WithString](w); err == nil {
+		t.Error("a string field registered; a string header holds a pointer")
+	}
+	if _, err := Register[WithPointer](w); err == nil {
+		t.Error("a pointer field registered")
+	}
+	if _, err := Register[WithMap](w); err == nil {
+		t.Error("a map field registered")
+	}
+	if _, err := Register[Nested](w); err == nil {
+		t.Error("a nested pointer-bearing struct registered")
+	}
+	if _, err := Register[WithArrayOfBad](w); err == nil {
+		t.Error("an array of pointer-bearing structs registered")
+	}
+
+	if _, err := Register[Position](w); err != nil {
+		t.Errorf("plain data was rejected: %v", err)
+	}
+	if _, err := Register[int32](w); err != nil {
+		t.Errorf("a scalar was rejected: %v", err)
+	}
+}
+
+func TestRegisterIsIdempotent(t *testing.T) {
+	w := newTestWorld(t)
+	a := MustRegister[Position](w)
+	b := MustRegister[Position](w)
+
+	if a.ID() != b.ID() {
+		t.Fatalf("second registration made a new id: %d then %d", a.ID(), b.ID())
+	}
+	if w.ComponentCount() != 1 {
+		t.Fatalf("stores = %d, want 1", w.ComponentCount())
+	}
 
 	e := w.Create()
-	w.Destroy(e, false)
-	_, ok := Get[Position](w, e)
-	if ok {
-		t.Fatal("Get on dead entity should return false")
+	a.Set(e, Position{X: 7})
+	v, ok := b.Get(e)
+	if !ok || v.X != 7 {
+		t.Fatal("the two handles do not share storage")
 	}
 }
 
-func TestRemove(t *testing.T) {
-	w := NewWorld()
-	Register[Position](w)
-	Register[Velocity](w)
-
+func TestZeroCompIsInert(t *testing.T) {
+	w := newTestWorld(t)
 	e := w.Create()
-	MustAdd[Position](w, e, Position{X: 1, Y: 2})
-	MustAdd[Velocity](w, e, Velocity{DX: 0.1, DY: 0.2})
 
-	MustRemove[Position](w, e)
-	if Has[Position](w, e) {
-		t.Fatal("Position should be removed")
+	var pos Comp[Position]
+	if pos.Valid() {
+		t.Fatal("the zero handle claims to be valid")
 	}
-	if !Has[Velocity](w, e) {
-		t.Fatal("Velocity should still exist")
+	if pos.Set(e, Position{}) || pos.Has(e) || pos.Remove(e) || pos.Wake(e) {
+		t.Error("the zero handle did something")
 	}
+	if _, ok := pos.Get(e); ok {
+		t.Error("the zero handle returned a value")
+	}
+	if pos.Len() != 0 || pos.AwakeLen() != 0 {
+		t.Error("the zero handle reported rows")
+	}
+	pos.Each(func(Entity, *Position) { t.Error("the zero handle iterated") })
 }
 
-func TestRemoveNonExistent(t *testing.T) {
-	w := NewWorld()
-	Register[Position](w)
+// The dense array, the owners array and the sparse index have to stay
+// consistent through arbitrary churn, since every removal moves a row.
+func TestStorageSurvivesChurn(t *testing.T) {
+	w := newTestWorld(t)
+	pos := MustRegister[Position](w)
 
-	e := w.Create()
-	err := Remove[Position](w, e)
-	if err != nil {
-		t.Fatal("removing non-existent component should not error")
-	}
-}
+	rng := rand.New(rand.NewSource(1))
+	live := map[Entity]float64{}
 
-func TestRemoveDeadEntity(t *testing.T) {
-	w := NewWorld()
-	Register[Position](w)
-
-	e := w.Create()
-	w.Destroy(e, false)
-	err := Remove[Position](w, e)
-	if err == nil {
-		t.Fatal("expected error removing from dead entity")
-	}
-}
-
-func TestMutateComponent(t *testing.T) {
-	w := NewWorld()
-	Register[Position](w)
-
-	e := w.Create()
-	MustAdd[Position](w, e, Position{X: 1, Y: 2})
-
-	pos, _ := Get[Position](w, e)
-	pos.X = 10
-	pos.Y = 20
-
-	pos2, _ := Get[Position](w, e)
-	if pos2.X != 10 || pos2.Y != 20 {
-		t.Fatal("mutation should affect data")
-	}
-}
-
-// --- Destroy with components ---
-
-func TestDestroyReleasesComponents(t *testing.T) {
-	w := NewWorld()
-	Register[Position](w)
-	Register[Health](w)
-
-	e := w.Create()
-	MustAdd[Position](w, e, Position{X: 1, Y: 2})
-	MustAdd[Health](w, e, Health{Current: 50, Max: 100})
-
-	w.Destroy(e, true)
-	if Has[Position](w, e) {
-		t.Fatal("dead entity should not have Position")
-	}
-	if Has[Health](w, e) {
-		t.Fatal("dead entity should not have Health")
-	}
-}
-
-// --- Sharing (Handle-based) ---
-
-func TestSharingHandle(t *testing.T) {
-	w := NewWorld()
-	Register[Position](w)
-
-	h := MustCreate[Position](w, Position{X: 5, Y: 5})
-
-	e1 := w.Create()
-	e2 := w.Create()
-	e3 := w.Create()
-
-	MustAttach[Position](w, e1, h)
-	MustAttach[Position](w, e2, h)
-	MustAttach[Position](w, e3, h)
-
-	p1, _ := Get[Position](w, e1)
-	p2, _ := Get[Position](w, e2)
-	p3, _ := Get[Position](w, e3)
-
-	if p1.X != 5 || p2.X != 5 || p3.X != 5 {
-		t.Fatal("shared data mismatch")
+	for step := range 20000 {
+		switch rng.Intn(3) {
+		case 0:
+			e := w.Create()
+			val := float64(step)
+			pos.Set(e, Position{X: val})
+			live[e] = val
+		case 1:
+			for e := range live {
+				pos.Remove(e)
+				delete(live, e)
+				break
+			}
+		case 2:
+			for e := range live {
+				w.Destroy(e)
+				delete(live, e)
+				break
+			}
+		}
 	}
 
-	p1.X = 99
-	if p2.X != 99 || p3.X != 99 {
-		t.Fatal("shared mutation not visible")
+	if pos.Len() != len(live) {
+		t.Fatalf("store holds %d rows, %d entities are live", pos.Len(), len(live))
 	}
-}
-
-func TestSharingDetach(t *testing.T) {
-	w := NewWorld()
-	Register[Position](w)
-
-	h := MustCreate[Position](w, Position{X: 7, Y: 7})
-
-	e1 := w.Create()
-	e2 := w.Create()
-
-	MustAttach[Position](w, e1, h)
-	MustAttach[Position](w, e2, h)
-
-	MustDetach[Position](w, e1)
-
-	if Has[Position](w, e1) {
-		t.Fatal("e1 should not have Position after detach")
-	}
-	if !Has[Position](w, e2) {
-		t.Fatal("e2 should still have Position")
-	}
-}
-
-func TestAttachDeadEntity(t *testing.T) {
-	w := NewWorld()
-	Register[Position](w)
-
-	h := MustCreate[Position](w, Position{X: 1, Y: 1})
-	e := w.Create()
-	w.Destroy(e, false)
-
-	err := Attach[Position](w, e, h)
-	if err == nil {
-		t.Fatal("expected error attaching to dead entity")
-	}
-}
-
-func TestDetachNonExistent(t *testing.T) {
-	w := NewWorld()
-	Register[Position](w)
-
-	e := w.Create()
-	MustDetach[Position](w, e)
-}
-
-func TestDestroyHandle(t *testing.T) {
-	w := NewWorld()
-	Register[Position](w)
-
-	h := MustCreate[Position](w, Position{X: 1, Y: 1})
-	DestroyHandle(w, h)
-
-	e := w.Create()
-	err := Attach[Position](w, e, h)
-	if err == nil {
-		t.Fatal("expected error attaching stale handle")
-	}
-}
-
-// --- Query ---
-
-func TestQuery(t *testing.T) {
-	w := NewWorld()
-	Register[Position](w)
-	Register[Velocity](w)
-
-	e1 := w.Create()
-	e2 := w.Create()
-	e3 := w.Create()
-
-	MustAdd[Position](w, e1, Position{X: 1, Y: 1})
-	MustAdd[Position](w, e2, Position{X: 2, Y: 2})
-	MustAdd[Velocity](w, e2, Velocity{DX: 0.1, DY: 0.1})
-	MustAdd[Velocity](w, e3, Velocity{DX: 0.2, DY: 0.2})
-
-	q := NewQuery[Position](w)
-	count := 0
-	q.ForEach(func(e Entity, p *Position) {
-		count++
-		p.X += 10
-	})
-
-	if count != 2 {
-		t.Fatalf("expected 2 entities with Position, got %d", count)
+	for e, want := range live {
+		v, ok := pos.Get(e)
+		if !ok {
+			t.Fatalf("entity %d lost its component", uint64(e))
+		}
+		if v.X != want {
+			t.Fatalf("entity %d has X=%v, want %v", uint64(e), v.X, want)
+		}
 	}
 
-	p1, _ := Get[Position](w, e1)
-	p2, _ := Get[Position](w, e2)
-	if p1.X != 11 || p2.X != 12 {
-		t.Fatal("query mutation should work")
-	}
-}
-
-func TestQueryEmpty(t *testing.T) {
-	w := NewWorld()
-	Register[Position](w)
-
-	q := NewQuery[Position](w)
-	count := 0
-	q.ForEach(func(e Entity, p *Position) {
-		count++
-	})
-	if count != 0 {
-		t.Fatal("expected 0 results")
-	}
-}
-
-func TestQueryMutates(t *testing.T) {
-	w := NewWorld()
-	Register[Position](w)
-
-	for i := range 10 {
-		e := w.Create()
-		MustAdd[Position](w, e, Position{X: float64(i), Y: 0})
-	}
-
-	q := NewQuery[Position](w)
-	q.ForEach(func(e Entity, p *Position) {
-		p.Y = p.X * 2
-	})
-
-	q2 := NewQuery[Position](w)
-	q2.ForEach(func(e Entity, p *Position) {
-		if p.Y != p.X*2 {
-			t.Fatalf("expected Y=%v, got Y=%v", p.X*2, p.Y)
+	seen := map[Entity]bool{}
+	pos.All(func(e Entity, v *Position) {
+		if seen[e] {
+			t.Fatalf("entity %d visited twice", uint64(e))
+		}
+		seen[e] = true
+		if live[e] != v.X {
+			t.Fatalf("iteration gave entity %d value %v, want %v", uint64(e), v.X, live[e])
 		}
 	})
-}
-
-// --- Group (signature-based) ---
-
-func TestGroup(t *testing.T) {
-	w := NewWorld()
-	Register[Position](w)
-	Register[Velocity](w)
-	Register[Health](w)
-
-	e1 := w.Create()
-	e2 := w.Create()
-	e3 := w.Create()
-
-	MustAdd[Position](w, e1, Position{X: 1, Y: 1})
-	MustAdd[Position](w, e2, Position{X: 2, Y: 2})
-	MustAdd[Velocity](w, e2, Velocity{DX: 0.1, DY: 0.1})
-	MustAdd[Position](w, e3, Position{X: 3, Y: 3})
-	MustAdd[Velocity](w, e3, Velocity{DX: 0.2, DY: 0.2})
-	MustAdd[Health](w, e3, Health{Current: 100, Max: 100})
-
-	g := NewGroup(w, Position{}, Velocity{})
-	count := 0
-	g.ForEach(func(e Entity) {
-		count++
-	})
-
-	if count != 2 {
-		t.Fatalf("expected 2 entities with Position+Velocity, got %d", count)
+	if len(seen) != len(live) {
+		t.Fatalf("iterated %d rows, %d are live", len(seen), len(live))
 	}
 }
 
-func TestGroupEmpty(t *testing.T) {
-	w := NewWorld()
-	Register[Position](w)
-	Register[Velocity](w)
+// Awake rows must stay at the front, so Each can walk a contiguous prefix.
+func TestAwakePartitionHolds(t *testing.T) {
+	w := newTestWorld(t)
+	pos := MustRegister[Position](w)
 
-	g := NewGroup(w, Position{}, Velocity{})
-	count := 0
-	g.ForEach(func(e Entity) {
-		count++
-	})
-	if count != 0 {
-		t.Fatal("expected 0 results")
+	ents := make([]Entity, 200)
+	for i := range ents {
+		ents[i] = w.Create()
+		pos.Set(ents[i], Position{X: float64(i)})
 	}
-}
-
-func TestGroupThreeComponents(t *testing.T) {
-	w := NewWorld()
-	Register[Position](w)
-	Register[Velocity](w)
-	Register[Health](w)
-
-	e1 := w.Create()
-	e2 := w.Create()
-
-	MustAdd[Position](w, e1, Position{X: 1, Y: 1})
-	MustAdd[Velocity](w, e1, Velocity{DX: 0.1, DY: 0.1})
-	MustAdd[Health](w, e1, Health{Current: 100, Max: 100})
-
-	MustAdd[Position](w, e2, Position{X: 2, Y: 2})
-	MustAdd[Velocity](w, e2, Velocity{DX: 0.2, DY: 0.2})
-
-	g := NewGroup(w, Position{}, Velocity{}, Health{})
-	count := 0
-	g.ForEach(func(e Entity) {
-		count++
-	})
-
-	if count != 1 {
-		t.Fatalf("expected 1 entity with all 3 components, got %d", count)
+	if pos.AwakeLen() != 0 {
+		t.Fatal("a new component started awake")
 	}
-}
+	pos.Each(func(Entity, *Position) { t.Error("Each visited a sleeping row") })
 
-// --- Entity recycling ---
-
-func TestEntityRecycling(t *testing.T) {
-	w := NewWorld()
-
-	e1 := w.Create()
-	w.Destroy(e1, false)
-	e2 := w.Create()
-
-	if e1.Index() != e2.Index() {
-		t.Fatal("recycled entity should reuse index")
-	}
-	if e1.Generation() >= e2.Generation() {
-		t.Fatal("recycled entity should have higher generation")
-	}
-}
-
-// --- Large batch ---
-
-func TestQueryLargeBatch(t *testing.T) {
-	w := NewWorld()
-	Register[Position](w)
-
-	for i := range 100 {
-		e := w.Create()
-		MustAdd[Position](w, e, Position{X: float64(i), Y: float64(i)})
-	}
-
-	q := NewQuery[Position](w)
-	sum := 0.0
-	q.ForEach(func(e Entity, p *Position) {
-		sum += p.X
-	})
-
-	expected := 0.0
-	for i := range 100 {
-		expected += float64(i)
-	}
-	if sum != expected {
-		t.Fatalf("expected sum %v, got %v", expected, sum)
-	}
-}
-
-// --- Detach cascade destruction ---
-
-func TestDetachCascadeDestroy(t *testing.T) {
-	w := NewWorld()
-	Register[Position](w)
-
-	h := MustCreate[Position](w, Position{X: 1, Y: 1})
-
-	e1 := w.Create()
-	e2 := w.Create()
-
-	MustAttach[Position](w, e1, h)
-	MustAttach[Position](w, e2, h)
-
-	MustDetach[Position](w, e1)
-	MustDetach[Position](w, e2)
-
-	// Both detached, handle refcount should be 0
-	// Attach to a new entity and destroy with cascade
-	e3 := w.Create()
-	MustAttach[Position](w, e3, h)
-	w.Destroy(e3, true)
-
-	// Handle should be gone now — attaching stale handle should fail
-	e4 := w.Create()
-	err := Attach[Position](w, e4, h)
-	if err == nil {
-		t.Fatal("expected error attaching stale handle after destroy")
-	}
-}
-
-// --- Group: entity-based ---
-
-func TestGroupOf(t *testing.T) {
-	w := NewWorld()
-	Register[Position](w)
-	Register[Velocity](w)
-
-	e1 := w.Create()
-	e2 := w.Create()
-	e3 := w.Create()
-
-	MustAdd[Position](w, e1, Position{X: 1, Y: 1})
-	MustAdd[Position](w, e2, Position{X: 2, Y: 2})
-	MustAdd[Velocity](w, e2, Velocity{DX: 0.1, DY: 0.1})
-	MustAdd[Position](w, e3, Position{X: 3, Y: 3})
-
-	g := NewGroupOf(w, e1, e3)
-	if g.Len() != 2 {
-		t.Fatalf("expected 2 entities, got %d", g.Len())
-	}
-
-	count := 0
-	g.ForEach(func(e Entity) {
-		count++
-		if e != e1 && e != e3 {
-			t.Fatalf("unexpected entity %v", e)
+	rng := rand.New(rand.NewSource(2))
+	awake := map[Entity]bool{}
+	for range 5000 {
+		e := ents[rng.Intn(len(ents))]
+		if rng.Intn(2) == 0 {
+			pos.Wake(e)
+			awake[e] = true
+		} else {
+			pos.Sleep(e)
+			delete(awake, e)
 		}
-	})
-	if count != 2 {
-		t.Fatalf("expected 2 iterations, got %d", count)
-	}
-}
 
-func TestGroupOfSkipsDead(t *testing.T) {
-	w := NewWorld()
-	Register[Position](w)
-
-	e1 := w.Create()
-	e2 := w.Create()
-	MustAdd[Position](w, e1, Position{X: 1, Y: 1})
-	MustAdd[Position](w, e2, Position{X: 2, Y: 2})
-	w.Destroy(e1, false)
-
-	g := NewGroupOf(w, e1, e2)
-	if g.Len() != 1 {
-		t.Fatalf("expected 1 alive entity, got %d", g.Len())
-	}
-}
-
-func TestGroupFrom(t *testing.T) {
-	w := NewWorld()
-	Register[Position](w)
-
-	e1 := w.Create()
-	e2 := w.Create()
-	e3 := w.Create()
-	MustAdd[Position](w, e1, Position{X: 1, Y: 1})
-	MustAdd[Position](w, e2, Position{X: 2, Y: 2})
-	MustAdd[Position](w, e3, Position{X: 3, Y: 3})
-
-	slice := []Entity{e1, e3}
-	g := NewGroupFrom(w, slice)
-	if g.Len() != 2 {
-		t.Fatalf("expected 2 entities, got %d", g.Len())
-	}
-}
-
-func TestGroupAdd(t *testing.T) {
-	w := NewWorld()
-	Register[Position](w)
-
-	e1 := w.Create()
-	e2 := w.Create()
-	e3 := w.Create()
-	MustAdd[Position](w, e1, Position{X: 1, Y: 1})
-	MustAdd[Position](w, e2, Position{X: 2, Y: 2})
-	MustAdd[Position](w, e3, Position{X: 3, Y: 3})
-
-	g := NewGroup(w) // empty
-	g.Add(e1)
-	g.Add(e2)
-
-	if g.Len() != 2 {
-		t.Fatalf("expected 2, got %d", g.Len())
-	}
-
-	g.Add(e3)
-	if g.Len() != 3 {
-		t.Fatalf("expected 3 after Add, got %d", g.Len())
-	}
-}
-
-func TestGroupAddSkipsDead(t *testing.T) {
-	w := NewWorld()
-	Register[Position](w)
-
-	e1 := w.Create()
-	MustAdd[Position](w, e1, Position{X: 1, Y: 1})
-	w.Destroy(e1, false)
-
-	g := NewGroup(w)
-	g.Add(e1)
-	if g.Len() != 0 {
-		t.Fatal("dead entity should not be added")
-	}
-}
-
-func TestGroupAddEntities(t *testing.T) {
-	w := NewWorld()
-	Register[Position](w)
-
-	e1 := w.Create()
-	e2 := w.Create()
-	e3 := w.Create()
-	MustAdd[Position](w, e1, Position{X: 1, Y: 1})
-	MustAdd[Position](w, e2, Position{X: 2, Y: 2})
-	MustAdd[Position](w, e3, Position{X: 3, Y: 3})
-
-	g := NewGroup(w)
-	g.AddEntities(e1, e2, e3)
-	if g.Len() != 3 {
-		t.Fatalf("expected 3, got %d", g.Len())
-	}
-}
-
-func TestGroupRemove(t *testing.T) {
-	w := NewWorld()
-	Register[Position](w)
-
-	e1 := w.Create()
-	e2 := w.Create()
-	e3 := w.Create()
-	MustAdd[Position](w, e1, Position{X: 1, Y: 1})
-	MustAdd[Position](w, e2, Position{X: 2, Y: 2})
-	MustAdd[Position](w, e3, Position{X: 3, Y: 3})
-
-	g := NewGroupOf(w, e1, e2, e3)
-	g.Remove(e2)
-	if g.Len() != 2 {
-		t.Fatalf("expected 2, got %d", g.Len())
-	}
-
-	g.ForEach(func(e Entity) {
-		if e == e2 {
-			t.Fatal("e2 should have been removed")
+		if pos.AwakeLen() != len(awake) {
+			t.Fatalf("awake count %d, want %d", pos.AwakeLen(), len(awake))
 		}
-	})
-}
-
-func TestGroupClear(t *testing.T) {
-	w := NewWorld()
-	Register[Position](w)
-
-	e1 := w.Create()
-	e2 := w.Create()
-	MustAdd[Position](w, e1, Position{X: 1, Y: 1})
-	MustAdd[Position](w, e2, Position{X: 2, Y: 2})
-
-	g := NewGroupOf(w, e1, e2)
-	g.Clear()
-	if g.Len() != 0 {
-		t.Fatalf("expected 0 after Clear, got %d", g.Len())
-	}
-}
-
-func TestGroupFilter(t *testing.T) {
-	w := NewWorld()
-	Register[Position](w)
-
-	e1 := w.Create()
-	e2 := w.Create()
-	e3 := w.Create()
-	MustAdd[Position](w, e1, Position{X: 1, Y: 1})
-	MustAdd[Position](w, e2, Position{X: 5, Y: 5})
-	MustAdd[Position](w, e3, Position{X: 10, Y: 10})
-
-	g := NewGroupOf(w, e1, e2, e3)
-	filtered := g.Filter(func(e Entity) bool {
-		p, ok := Get[Position](w, e)
-		return ok && p.X > 3
-	})
-
-	if filtered.Len() != 2 {
-		t.Fatalf("expected 2 filtered entities, got %d", filtered.Len())
 	}
 
-	filtered.ForEach(func(e Entity) {
-		p, _ := Get[Position](w, e)
-		if p.X <= 3 {
-			t.Fatalf("entity with X=%v should have been filtered out", p.X)
+	seen := map[Entity]bool{}
+	pos.Each(func(e Entity, v *Position) {
+		if !awake[e] {
+			t.Fatalf("Each visited sleeping entity %d", uint64(e))
 		}
+		seen[e] = true
 	})
-}
-
-func TestGroupFilterEmpty(t *testing.T) {
-	w := NewWorld()
-	Register[Position](w)
-
-	e1 := w.Create()
-	MustAdd[Position](w, e1, Position{X: 1, Y: 1})
-
-	g := NewGroupOf(w, e1)
-	filtered := g.Filter(func(e Entity) bool { return false })
-	if filtered.Len() != 0 {
-		t.Fatal("expected 0 after filtering everything out")
+	if len(seen) != len(awake) {
+		t.Fatalf("Each visited %d, %d are awake", len(seen), len(awake))
 	}
 }
 
-func TestGroupFilterPreservesOriginal(t *testing.T) {
-	w := NewWorld()
-	Register[Position](w)
+// Removing an awake row must not leave a sleeping row inside the partition.
+func TestRemoveFromAwakePartition(t *testing.T) {
+	w := newTestWorld(t)
+	pos := MustRegister[Position](w)
 
-	e1 := w.Create()
-	e2 := w.Create()
-	MustAdd[Position](w, e1, Position{X: 1, Y: 1})
-	MustAdd[Position](w, e2, Position{X: 5, Y: 5})
-
-	g := NewGroupOf(w, e1, e2)
-	_ = g.Filter(func(e Entity) bool {
-		p, _ := Get[Position](w, e)
-		return p.X > 3
-	})
-
-	// Original group should be unchanged
-	if g.Len() != 2 {
-		t.Fatal("Filter should not modify original group")
-	}
-}
-
-func TestGroupConvertsOnAdd(t *testing.T) {
-	w := NewWorld()
-	Register[Position](w)
-	Register[Velocity](w)
-
-	e1 := w.Create()
-	e2 := w.Create()
-	e3 := w.Create()
-	MustAdd[Position](w, e1, Position{X: 1, Y: 1})
-	MustAdd[Position](w, e2, Position{X: 2, Y: 2})
-	MustAdd[Velocity](w, e2, Velocity{DX: 0.1, DY: 0.1})
-	MustAdd[Position](w, e3, Position{X: 3, Y: 3})
-
-	// Start as signature-based
-	g := NewGroup(w, Position{}, Velocity{})
-	if g.Len() != 1 { // only e2 has both
-		t.Fatalf("expected 1 signature-matched entity, got %d", g.Len())
-	}
-
-	// Adding an entity converts to entity-based
-	g.Add(e1)
-	// Now it has the previously resolved entities + e1
-	// After resolve() + Add, it becomes entity-based with [e2, e1]
-	if g.Len() != 2 {
-		t.Fatalf("expected 2 after Add, got %d", g.Len())
-	}
-}
-
-// --- Query expansion ---
-
-func TestQueryLen(t *testing.T) {
-	w := NewWorld()
-	Register[Position](w)
-
-	for i := range 5 {
-		e := w.Create()
-		MustAdd[Position](w, e, Position{X: float64(i), Y: 0})
-	}
-	w.Create() // no Position — should not be counted
-
-	q := NewQuery[Position](w)
-	if q.Len() != 5 {
-		t.Fatalf("expected Len()=5, got %d", q.Len())
-	}
-}
-
-func TestQueryForEachUntil(t *testing.T) {
-	w := NewWorld()
-	Register[Position](w)
-
-	for i := range 10 {
-		e := w.Create()
-		MustAdd[Position](w, e, Position{X: float64(i), Y: 0})
-	}
-
-	q := NewQuery[Position](w)
-	sum := 0.0
-	q.ForEachUntil(func(e Entity, p *Position) bool {
-		if p.X >= 3 {
-			return false
-		}
-		sum += p.X
-		return true
-	})
-
-	if sum != 3 {
-		t.Fatalf("expected sum=3 (0+1+2), got %v", sum)
-	}
-}
-
-func TestQueryFilter(t *testing.T) {
-	w := NewWorld()
-	Register[Position](w)
-
-	for i := range 10 {
-		e := w.Create()
-		MustAdd[Position](w, e, Position{X: float64(i), Y: 0})
-	}
-
-	q := NewQuery[Position](w)
-	filtered := q.Filter(func(e Entity, p *Position) bool {
-		return p.X >= 5
-	})
-
-	if filtered.Len() != 5 {
-		t.Fatalf("expected 5 filtered, got %d", filtered.Len())
-	}
-
-	// Original query unchanged
-	if q.Len() != 10 {
-		t.Fatal("original query should be unchanged")
-	}
-}
-
-func TestQueryFilterForEach(t *testing.T) {
-	w := NewWorld()
-	Register[Position](w)
-
-	for i := range 10 {
-		e := w.Create()
-		MustAdd[Position](w, e, Position{X: float64(i), Y: 0})
-	}
-
-	filtered := NewQuery[Position](w).Filter(func(e Entity, p *Position) bool {
-		return p.X >= 5
-	})
-
-	count := 0
-	filtered.ForEach(func(e Entity, p *Position) {
-		if p.X < 5 {
-			t.Fatalf("entity with X=%v should have been filtered out", p.X)
-		}
-		count++
-	})
-	if count != 5 {
-		t.Fatalf("expected 5 iterations, got %d", count)
-	}
-}
-
-func TestQueryCollect(t *testing.T) {
-	w := NewWorld()
-	Register[Position](w)
-
-	e1 := w.Create()
-	e2 := w.Create()
-	e3 := w.Create()
-	MustAdd[Position](w, e1, Position{X: 1, Y: 1})
-	MustAdd[Position](w, e2, Position{X: 2, Y: 2})
-	MustAdd[Position](w, e3, Position{X: 3, Y: 3})
-
-	ents := NewQuery[Position](w).Collect()
-	if len(ents) != 3 {
-		t.Fatalf("expected 3 entities, got %d", len(ents))
-	}
-}
-
-func TestQueryGroup(t *testing.T) {
-	w := NewWorld()
-	Register[Position](w)
-
-	for i := range 5 {
-		e := w.Create()
-		MustAdd[Position](w, e, Position{X: float64(i), Y: 0})
-	}
-
-	g := NewQuery[Position](w).Group()
-	if g.Len() != 5 {
-		t.Fatalf("expected group of 5, got %d", g.Len())
-	}
-}
-
-func TestQueryGroupFromFilter(t *testing.T) {
-	w := NewWorld()
-	Register[Position](w)
-	Register[Velocity](w)
-
-	for i := range 10 {
-		e := w.Create()
-		MustAdd[Position](w, e, Position{X: float64(i), Y: 0})
+	ents := make([]Entity, 50)
+	for i := range ents {
+		ents[i] = w.Create()
+		pos.Set(ents[i], Position{X: float64(i)})
 		if i%2 == 0 {
-			MustAdd[Velocity](w, e, Velocity{DX: 1, DY: 1})
+			pos.Wake(ents[i])
 		}
 	}
-
-	// Filter Positions to only those on even entities, then turn into Group
-	filtered := NewQuery[Position](w).Filter(func(e Entity, p *Position) bool {
-		return int(p.X)%2 == 0
-	})
-	g := filtered.Group()
-
-	if g.Len() != 5 {
-		t.Fatalf("expected 5 even-positioned entities, got %d", g.Len())
+	want := 25
+	for i := 0; i < len(ents); i += 4 {
+		if pos.Awake(ents[i]) {
+			want--
+		}
+		pos.Remove(ents[i])
 	}
-
-	// Can now use SIMD on the filtered group
-	g.AddNumber(func(c any) *float64 { return &c.(*Position).X }, 1000)
-
-	// Verify only filtered entities were modified
-	NewQuery[Position](w).ForEach(func(e Entity, p *Position) {
-		if int(p.X)%2 == 0 && p.X < 1000 {
-			t.Fatalf("even entity with X=%v should have been modified", p.X)
+	if pos.AwakeLen() != want {
+		t.Fatalf("awake count %d, want %d", pos.AwakeLen(), want)
+	}
+	pos.Each(func(e Entity, _ *Position) {
+		if !pos.Awake(e) {
+			t.Fatalf("entity %d is inside the partition but not awake", uint64(e))
 		}
 	})
 }
 
-func TestQueryAny(t *testing.T) {
-	w := NewWorld()
-	Register[Position](w)
+func TestDestroyClearsEveryStore(t *testing.T) {
+	w := newTestWorld(t)
+	pos := MustRegister[Position](w)
+	vel := MustRegister[Velocity](w)
+	heat := MustRegister[Heat](w)
 
 	e := w.Create()
-	MustAdd[Position](w, e, Position{X: 42, Y: 99})
+	pos.Set(e, Position{})
+	vel.Set(e, Velocity{})
+	heat.Set(e, Heat{Kelvin: 293})
 
-	got, pos, ok := NewQuery[Position](w).Any()
-	if !ok {
-		t.Fatal("expected Any to return true")
-	}
-	if got != e || pos.X != 42 || pos.Y != 99 {
-		t.Fatalf("expected (%v, 42, 99), got (%v, %v, %v)", e, got, pos.X, pos.Y)
-	}
-}
+	w.Destroy(e)
 
-func TestQueryAnyEmpty(t *testing.T) {
-	w := NewWorld()
-	Register[Position](w)
-
-	_, _, ok := NewQuery[Position](w).Any()
-	if ok {
-		t.Fatal("expected Any to return false on empty")
+	if pos.Len() != 0 || vel.Len() != 0 || heat.Len() != 0 {
+		t.Fatalf("rows survived the entity: %d %d %d", pos.Len(), vel.Len(), heat.Len())
 	}
 }
 
-func TestQueryCountIf(t *testing.T) {
-	w := NewWorld()
-	Register[Position](w)
+func TestEachN(t *testing.T) {
+	w := newTestWorld(t)
+	pos := MustRegister[Position](w)
+	vel := MustRegister[Velocity](w)
+	heat := MustRegister[Heat](w)
+
+	var both, all3 int
+	for i := range 100 {
+		e := w.Create()
+		pos.Set(e, Position{X: 1})
+		pos.Wake(e)
+		if i%2 == 0 {
+			vel.Set(e, Velocity{X: 2})
+			both++
+		}
+		if i%4 == 0 {
+			heat.Set(e, Heat{Kelvin: 300})
+			all3++
+		}
+	}
+
+	n := 0
+	Each2(pos, vel, func(_ Entity, p *Position, v *Velocity) {
+		p.X += v.X
+		n++
+	})
+	if n != both {
+		t.Fatalf("Each2 visited %d, want %d", n, both)
+	}
+
+	n = 0
+	Each3(pos, vel, heat, func(_ Entity, _ *Position, _ *Velocity, h *Heat) {
+		if h.Kelvin != 300 {
+			t.Fatal("Each3 handed over the wrong Heat")
+		}
+		n++
+	})
+	if n != all3 {
+		t.Fatalf("Each3 visited %d, want %d", n, all3)
+	}
+
+	pos.Each(func(e Entity, p *Position) {
+		want := 1.0
+		if vel.Has(e) {
+			want = 3.0
+		}
+		if p.X != want {
+			t.Fatalf("entity %d has X=%v, want %v", uint64(e), p.X, want)
+		}
+	})
+}
+
+func TestRowsAreTheStorage(t *testing.T) {
+	w := newTestWorld(t)
+	pos := MustRegister[Position](w)
+
+	ents := make([]Entity, 10)
+	for i := range ents {
+		ents[i] = w.Create()
+		pos.Set(ents[i], Position{X: float64(i)})
+		pos.Wake(ents[i])
+	}
+
+	rows := pos.Rows()
+	if len(rows) != 10 {
+		t.Fatalf("Rows returned %d, want 10", len(rows))
+	}
+	for i := range rows {
+		rows[i].X *= 2
+	}
+
+	owners := pos.Owners()
+	for i, e := range owners {
+		v, _ := pos.Get(e)
+		if v.X != rows[i].X {
+			t.Fatal("Rows is a copy, not the storage")
+		}
+	}
+}
+
+func TestCommandBufferDefersChange(t *testing.T) {
+	w := newTestWorld(t)
+	pos := MustRegister[Position](w)
 
 	for i := range 10 {
 		e := w.Create()
-		MustAdd[Position](w, e, Position{X: float64(i), Y: 0})
+		pos.Set(e, Position{X: float64(i)})
+		pos.Wake(e)
 	}
 
-	count := NewQuery[Position](w).CountIf(func(e Entity, p *Position) bool {
-		return p.X >= 7
+	cmd := w.Commands()
+	pos.Each(func(e Entity, v *Position) {
+		if v.X < 5 {
+			cmd.Destroy(e)
+		}
 	})
-	if count != 3 {
-		t.Fatalf("expected 3, got %d", count)
+	cmd.Do(func(w *World) {
+		e := w.Create()
+		pos.Set(e, Position{X: 100})
+		pos.Wake(e)
+	})
+
+	if w.Count() != 10 {
+		t.Fatalf("the buffer changed the world before the flush: count %d", w.Count())
+	}
+	w.Flush()
+	if w.Count() != 6 {
+		t.Fatalf("count = %d after flush, want 6", w.Count())
+	}
+	if cmd.Len() != 0 {
+		t.Fatal("the buffer kept its commands after applying them")
+	}
+}
+
+func TestReset(t *testing.T) {
+	w := newTestWorld(t)
+	pos := MustRegister[Position](w)
+
+	for range 100 {
+		e := w.Create()
+		pos.Set(e, Position{})
+		pos.Wake(e)
+	}
+	w.Reset()
+
+	if w.Count() != 0 || pos.Len() != 0 || pos.AwakeLen() != 0 {
+		t.Fatalf("reset left %d entities and %d rows", w.Count(), pos.Len())
+	}
+	e := w.Create()
+	if !pos.Set(e, Position{X: 1}) {
+		t.Fatal("the component handle stopped working across a reset")
+	}
+}
+
+type testSystem struct {
+	Base
+	name string
+}
+
+func TestSystemRegistry(t *testing.T) {
+	w := newTestWorld(t)
+	s := &testSystem{name: "power"}
+
+	if err := w.RegisterSystem(s); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if err := w.RegisterSystem(&testSystem{name: "other"}); err == nil {
+		t.Fatal("registering the same type twice was accepted")
+	}
+	got, ok := GetSystem[*testSystem](w)
+	if !ok || got.name != "power" {
+		t.Fatalf("GetSystem returned %v, %v", got, ok)
+	}
+}
+
+// Allocation guards. A tick may not allocate, so the operations a tick performs
+// are held to zero here rather than measured after the fact.
+
+func TestIterationDoesNotAllocate(t *testing.T) {
+	w := newTestWorld(t)
+	pos := MustRegister[Position](w)
+	vel := MustRegister[Velocity](w)
+	for range 1000 {
+		e := w.Create()
+		pos.Set(e, Position{})
+		vel.Set(e, Velocity{X: 1})
+		pos.Wake(e)
+	}
+
+	if n := testing.AllocsPerRun(100, func() {
+		pos.Each(func(_ Entity, p *Position) { p.X++ })
+	}); n != 0 {
+		t.Errorf("Each allocated %v times a run", n)
+	}
+	if n := testing.AllocsPerRun(100, func() {
+		Each2(pos, vel, func(_ Entity, p *Position, v *Velocity) { p.X += v.X })
+	}); n != 0 {
+		t.Errorf("Each2 allocated %v times a run", n)
+	}
+}
+
+func TestWakeSleepDoNotAllocate(t *testing.T) {
+	w := newTestWorld(t)
+	pos := MustRegister[Position](w)
+	ents := make([]Entity, 100)
+	for i := range ents {
+		ents[i] = w.Create()
+		pos.Set(ents[i], Position{})
+	}
+
+	if n := testing.AllocsPerRun(100, func() {
+		for _, e := range ents {
+			pos.Wake(e)
+		}
+		for _, e := range ents {
+			pos.Sleep(e)
+		}
+	}); n != 0 {
+		t.Errorf("wake and sleep allocated %v times a run", n)
 	}
 }
