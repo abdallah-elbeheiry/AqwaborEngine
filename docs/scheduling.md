@@ -38,8 +38,8 @@ s.Quantum() time.Duration // 1/masterHz * speed, or 0 if speed ≤ 0 or master H
 ```
 
 - Master Hz must be ≥ 1 and ≤ 1000. Setting 0 is rejected.
-- If `SetMasterHz` has never been called, `AdvanceTicks` panics (no default — the caller must
-  commit to an explicit rate).
+- If `SetMasterHz` has never been called, `Advance`, `AdvanceTicks`, and `Run` all panic
+  (no default — the caller must commit to an explicit rate).
 - `Quantum()` reflects the current speed setting: it is `time.Second / masterHz * speed`.
 - Integer master tick count (`SimTicks`) is the source of truth; durations are derived when needed.
 
@@ -93,7 +93,12 @@ type AdvanceResult struct {
 ```go
 s.SimTime() time.Duration   // current simulation time
 s.SimTicks() uint64         // number of master quanta advanced
+s.Ticks(every uint) uint64  // tick count of the first job with this period
 ```
+
+`Ticks(every)` returns the tick count of the **first** job registered with that
+period. When multiple jobs share the same `every`, use `job.Tick()` for a
+per-job counter instead.
 
 ## Jobs
 
@@ -114,11 +119,14 @@ job := s.Run(fn func(TickState), every uint)  // every ≥ 1 master ticks
 job.Pause()   // freeze this job; skipped in the batch, no tick index advance
 job.Resume()  // unfreeze; next advance picks up where it left off
 job.Stop()    // unregister this job only; safe concurrent with Advance
+job.Tick()    // this job's own tick count (0-based)
 ```
 
-Paused jobs are frozen: they do not advance their tick index while paused. Stopped jobs are
-removed from the published order via copy-on-write; the `Advance` call that is in flight sees
-the snapshot it captured and finishes normally.
+Paused jobs are frozen: their tick index and next-fire deadline do not advance. The
+advance skips them entirely, so no catch-up is consumed while paused. On resume the
+job catches up from where it left off. Stopped jobs are physically removed from the
+slice under mutex and the order is rebuilt; an `Advance` call in flight sees the
+snapshot it captured and finishes normally.
 
 ### Per-job tick identity
 
@@ -151,19 +159,31 @@ s.SetSpeed(speed float64)   // < 0 → clamped to 0
 s.Speed() float64
 ```
 
-- Default speed is 1.
-- Speed affects **`AdvanceTicks` and `Quantum` only**. `Advance(simDT)` ignores speed entirely.
-- When speed ≤ 0, `AdvanceTicks` advances nothing and `Advance` is a no-op (if paused).
-- Speed does not change the master Hz — it scales the effective quantum duration.
+Default speed is 1. Speed does not change the master Hz — it scales how hard
+`AdvanceTicks` pushes the clock.
+
+| API | What it does | Speed? |
+|-----|-------------|--------|
+| `Advance(simDT)` | Push exactly `simDT` of simulation time | **Ignored** |
+| `AdvanceTicks(n)` | Push `n × quantum × speed` of simulation time | **Applied** |
+
+`Advance(simDT)` is explicit time. A `simDT` of 10ms always advances 10ms
+regardless of the speed setting. `AdvanceTicks(n)` is the speed-scaled path
+used by real-time frame loops.
 
 ```go
-// Fast-forward: advance 3× as many quanta per frame
-s.SetSpeed(3)
-s.AdvanceTicks(1) // equivalent to 3 master ticks at speed 1
+// Fast-forward 4× without touching speed:
+s.AdvanceTicks(4)             // 4 quanta at speed 1
 
-// Or equivalently:
-s.AdvanceTicks(3) // 3 ticks at speed 1, same result
+// Fast-forward 4× via speed (real-time loop unchanged):
+s.SetSpeed(4)
+s.AdvanceTicks(1)             // each frame pushes 4 quanta
+
+// Explicit time — speed irrelevant:
+s.Advance(time.Second / 60)   // always advances exactly 1/60th
 ```
+
+When speed ≤ 0, `AdvanceTicks` advances nothing. When paused, both are no-ops.
 
 ## Pause and resume
 

@@ -14,6 +14,17 @@ var (
 	SinkSlice []float64
 )
 
+// This file benchmarks two distinct scheduler paths:
+//
+//   - Advance(simDT): pushes exactly simDT of simulation time. Speed is ignored.
+//     Measures pure tick-dispatch throughput independent of speed.
+//
+//   - AdvanceTicks(n): pushes n * quantum * speed of simulation time.
+//     Measures the speed-scaled path used by real-time frame loops.
+//
+// Changing SetSpeed has no effect on Advance benchmarks. That is correct —
+// Advance is explicit time, AdvanceTicks is the speed-scaled path.
+
 func BenchmarkScheduler_TickThroughput(b *testing.B) {
 	for _, every := range []uint{1, 10, 100, 1000} {
 		name := "Every_" + strconv.FormatUint(uint64(every), 10)
@@ -181,6 +192,11 @@ func BenchmarkScheduler_MultiRateThroughput(b *testing.B) {
 	}
 }
 
+// BenchmarkScheduler_SpeedScaling measures AdvanceTicks throughput at different
+// speed settings. Speed only affects AdvanceTicks (not Advance), so this bench
+// exercises the actual speed-scaled path. At speed=0.1, 10 input ticks become
+// 1 scaled tick; at speed=100, they become 1000. The ticks/sec metric should
+// scale roughly with speed.
 func BenchmarkScheduler_SpeedScaling(b *testing.B) {
 	speeds := []float64{0.1, 0.5, 1.0, 2.0, 10.0, 100.0}
 
