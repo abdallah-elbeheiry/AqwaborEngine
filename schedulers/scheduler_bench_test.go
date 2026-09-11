@@ -9,25 +9,25 @@ import (
 )
 
 func BenchmarkScheduler_TickThroughput(b *testing.B) {
-	for _, hz := range []float64{1000, 10000, 100000, 1000000} {
-		name := "Hz_" + strconv.FormatFloat(hz, 'f', 0, 64)
+	for _, every := range []uint{1, 10, 100, 1000} {
+		name := "Every_" + strconv.FormatUint(uint64(every), 10)
 		b.Run(name, func(b *testing.B) {
 			s := NewScheduler()
+			s.SetMasterHz(1000) // 1kHz base
 			var count atomic.Int64
 
 			s.Run(func(st TickState) {
 				count.Add(1)
-			}, hz)
+			}, every)
 
-			// Use Advance directly instead of the pacer.
-			interval := time.Duration(float64(time.Second) / hz)
+			quantum := time.Second / 1000
 
 			b.ResetTimer()
 			start := time.Now()
 			startCount := count.Load()
 
 			for i := 0; i < b.N; i++ {
-				s.Advance(interval)
+				s.Advance(quantum)
 			}
 
 			elapsed := time.Since(start)
@@ -42,6 +42,7 @@ func BenchmarkScheduler_MathThroughput(b *testing.B) {
 		name := "Work_" + strconv.Itoa(work)
 		b.Run(name, func(b *testing.B) {
 			s := NewScheduler()
+			s.SetMasterHz(100_000)
 			var count atomic.Int64
 
 			s.Run(func(st TickState) {
@@ -51,16 +52,16 @@ func BenchmarkScheduler_MathThroughput(b *testing.B) {
 				}
 				_ = sum
 				count.Add(1)
-			}, 100_000.0)
+			}, 1)
 
-			interval := time.Duration(float64(time.Second) / 100_000.0)
+			quantum := time.Duration(float64(time.Second) / 100_000.0)
 
 			b.ResetTimer()
 			start := time.Now()
 			startCount := count.Load()
 
 			for i := 0; i < b.N; i++ {
-				s.Advance(interval)
+				s.Advance(quantum)
 			}
 
 			elapsed := time.Since(start)
@@ -72,6 +73,7 @@ func BenchmarkScheduler_MathThroughput(b *testing.B) {
 
 func BenchmarkScheduler_MaxSpeedMath(b *testing.B) {
 	s := NewScheduler()
+	s.SetMasterHz(1_000_000)
 	var count atomic.Int64
 
 	s.Run(func(st TickState) {
@@ -81,16 +83,16 @@ func BenchmarkScheduler_MaxSpeedMath(b *testing.B) {
 		}
 		_ = sum
 		count.Add(1)
-	}, 1_000_000.0)
+	}, 1)
 
-	interval := time.Duration(float64(time.Second) / 1_000_000.0)
+	quantum := time.Duration(float64(time.Second) / 1_000_000.0)
 
 	b.ResetTimer()
 	start := time.Now()
 	startCount := count.Load()
 
 	for i := 0; i < b.N; i++ {
-		s.Advance(interval)
+		s.Advance(quantum)
 	}
 
 	elapsed := time.Since(start)
@@ -100,7 +102,8 @@ func BenchmarkScheduler_MaxSpeedMath(b *testing.B) {
 
 func BenchmarkScheduler_MultiRateThroughput(b *testing.B) {
 	s := NewScheduler()
-	var count1m, count100k, count10k, count1k atomic.Int64
+	s.SetMasterHz(1_000_000)
+	var count1, count2, count3, count4 atomic.Int64
 
 	s.Run(func(st TickState) {
 		var sum float64
@@ -108,8 +111,8 @@ func BenchmarkScheduler_MultiRateThroughput(b *testing.B) {
 			sum += math.Sin(float64(st.Tick)*0.01) * math.Cos(float64(j)*0.1)
 		}
 		_ = sum
-		count1m.Add(1)
-	}, 1_000_000.0)
+		count1.Add(1)
+	}, 1)
 
 	s.Run(func(st TickState) {
 		var sum float64
@@ -117,8 +120,8 @@ func BenchmarkScheduler_MultiRateThroughput(b *testing.B) {
 			sum += math.Sin(float64(st.Tick)*0.01) * math.Cos(float64(j)*0.1)
 		}
 		_ = sum
-		count100k.Add(1)
-	}, 100_000.0)
+		count2.Add(1)
+	}, 10)
 
 	s.Run(func(st TickState) {
 		var sum float64
@@ -126,8 +129,8 @@ func BenchmarkScheduler_MultiRateThroughput(b *testing.B) {
 			sum += math.Sqrt(float64(st.Tick) + float64(j))
 		}
 		_ = sum
-		count10k.Add(1)
-	}, 10_000.0)
+		count3.Add(1)
+	}, 100)
 
 	s.Run(func(st TickState) {
 		var sum float64
@@ -135,39 +138,32 @@ func BenchmarkScheduler_MultiRateThroughput(b *testing.B) {
 			sum += math.Log(float64(st.Tick)*0.001 + float64(j)*0.01 + 1)
 		}
 		_ = sum
-		count1k.Add(1)
-	}, 1_000.0)
+		count4.Add(1)
+	}, 1000)
 
-	intervals := map[float64]time.Duration{
-		1_000_000.0: time.Duration(float64(time.Second) / 1_000_000.0),
-		100_000.0:   time.Duration(float64(time.Second) / 100_000.0),
-		10_000.0:    time.Duration(float64(time.Second) / 10_000.0),
-		1_000.0:     time.Duration(float64(time.Second) / 1_000.0),
-	}
+	quantum := time.Duration(float64(time.Second) / 1_000_000.0)
 
 	b.ResetTimer()
 	start := time.Now()
-	c1m := count1m.Load()
-	c100k := count100k.Load()
-	c10k := count10k.Load()
-	c1k := count1k.Load()
+	c1 := count1.Load()
+	c2 := count2.Load()
+	c3 := count3.Load()
+	c4 := count4.Load()
 
 	for i := 0; i < b.N; i++ {
-		s.Advance(intervals[1_000_000.0])
-		s.Advance(intervals[100_000.0])
-		s.Advance(intervals[10_000.0])
-		s.Advance(intervals[1_000.0])
+		s.Advance(quantum)
 	}
 
 	elapsed := time.Since(start)
-	b.ReportMetric(float64(count1m.Load()-c1m)/elapsed.Seconds(), "ticks/sec-target-1m")
-	b.ReportMetric(float64(count100k.Load()-c100k)/elapsed.Seconds(), "ticks/sec-target-100k")
-	b.ReportMetric(float64(count10k.Load()-c10k)/elapsed.Seconds(), "ticks/sec-target-10k")
-	b.ReportMetric(float64(count1k.Load()-c1k)/elapsed.Seconds(), "ticks/sec-target-1k")
+	b.ReportMetric(float64(count1.Load()-c1)/elapsed.Seconds(), "ticks/sec-every1")
+	b.ReportMetric(float64(count2.Load()-c2)/elapsed.Seconds(), "ticks/sec-every10")
+	b.ReportMetric(float64(count3.Load()-c3)/elapsed.Seconds(), "ticks/sec-every100")
+	b.ReportMetric(float64(count4.Load()-c4)/elapsed.Seconds(), "ticks/sec-every1000")
 }
 
 func BenchmarkScheduler_SpeedScaling(b *testing.B) {
 	s := NewScheduler()
+	s.SetMasterHz(10_000)
 	var count atomic.Int64
 
 	s.Run(func(st TickState) {
@@ -177,24 +173,21 @@ func BenchmarkScheduler_SpeedScaling(b *testing.B) {
 		}
 		_ = sum
 		count.Add(1)
-	}, 10_000.0)
-
-	interval := time.Duration(float64(time.Second) / 10_000.0)
-
-	b.ResetTimer()
+	}, 1)
 
 	speeds := []float64{0.1, 0.5, 1.0, 2.0, 10.0, 100.0}
 	for _, speed := range speeds {
 		name := "Speed_" + strconv.FormatFloat(speed, 'f', 1, 64) + "x"
 		b.Run(name, func(b *testing.B) {
 			s.SetSpeed(speed)
+			quantum := s.Quantum()
 
 			b.ResetTimer()
 			start := time.Now()
 			startCount := count.Load()
 
 			for i := 0; i < b.N; i++ {
-				s.Advance(interval)
+				s.Advance(quantum)
 			}
 
 			elapsed := time.Since(start)

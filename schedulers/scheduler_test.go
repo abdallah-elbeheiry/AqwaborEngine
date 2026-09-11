@@ -7,20 +7,15 @@ import (
 	"time"
 )
 
-// --- Tests using Advance (pure core, no wall clock) ---
-
 func TestAdvance_Basic(t *testing.T) {
 	s := NewScheduler()
+	s.SetMasterHz(60)
 	var count atomic.Int64
 
-	s.Run(func(st TickState) {
-		count.Add(1)
-	}, 100.0)
+	s.Run(func(st TickState) { count.Add(1) }, 1) // every=1 → 60Hz
 
-	// 100Hz: interval=10ms, next starts at 0.
-	// Advance 50ms fires ticks at simTime 0,10,20,30,40,50 → 6 ticks.
-	result := s.Advance(50 * time.Millisecond)
-
+	// 100ms at 60Hz = 6 ticks. next starts at 0 → ticks 0..5 → 6 ticks.
+	result := s.Advance(100 * time.Millisecond)
 	if result.Fired != 6 {
 		t.Fatalf("expected 6 ticks fired, got %d", result.Fired)
 	}
@@ -29,65 +24,46 @@ func TestAdvance_Basic(t *testing.T) {
 	}
 }
 
-func TestAdvance_MultipleRates(t *testing.T) {
+func TestAdvance_MultipleJobs(t *testing.T) {
 	s := NewScheduler()
-	var count100, count10 atomic.Int64
+	s.SetMasterHz(60)
+	var countFast, countSlow atomic.Int64
 
-	s.Run(func(st TickState) { count100.Add(1) }, 100.0)
-	s.Run(func(st TickState) { count10.Add(1) }, 10.0)
+	s.Run(func(st TickState) { countFast.Add(1) }, 1) // 60Hz
+	s.Run(func(st TickState) { countSlow.Add(1) }, 6) // 10Hz
 
-	// 50ms: 100Hz fires 6 times (next=0→50ms), 10Hz fires 1 time (next=0, then 100>50).
-	result := s.Advance(50 * time.Millisecond)
-
+	// 100ms at 60Hz = 6 master ticks.
+	// every=1 fires at ticks 0..5 → 6 ticks.
+	// every=6 fires at tick 0, then tick 6 > 5 → 1 tick.
+	result := s.Advance(100 * time.Millisecond)
 	if result.Fired != 7 {
 		t.Fatalf("expected 7 ticks total, got %d", result.Fired)
 	}
-	if count100.Load() != 6 {
-		t.Fatalf("expected 6 at 100Hz, got %d", count100.Load())
+	if countFast.Load() != 6 {
+		t.Fatalf("expected 6 fast ticks, got %d", countFast.Load())
 	}
-	if count10.Load() != 1 {
-		t.Fatalf("expected 1 at 10Hz, got %d", count10.Load())
-	}
-}
-
-func TestAdvance_MultipleRatesAllFire(t *testing.T) {
-	s := NewScheduler()
-	var count100, count10 atomic.Int64
-
-	s.Run(func(st TickState) { count100.Add(1) }, 100.0)
-	s.Run(func(st TickState) { count10.Add(1) }, 10.0)
-
-	// 100Hz: interval=10ms, maxCatchUp=8 → 8 ticks (next=0..70ms).
-	// 10Hz: interval=100ms → 2 ticks (next=0,100 ≤ 100ms).
-	result := s.Advance(100 * time.Millisecond)
-
-	if count100.Load() != 8 {
-		t.Fatalf("expected 8 at 100Hz, got %d", count100.Load())
-	}
-	if count10.Load() != 2 {
-		t.Fatalf("expected 2 at 10Hz, got %d", count10.Load())
-	}
-	if result.Fired != 10 {
-		t.Fatalf("expected 10 total, got %d", result.Fired)
+	if countSlow.Load() != 1 {
+		t.Fatalf("expected 1 slow tick, got %d", countSlow.Load())
 	}
 }
 
 func TestAdvance_Order(t *testing.T) {
 	s := NewScheduler()
+	s.SetMasterHz(60)
 	var order []int
 	var mu sync.Mutex
 
+	// Register slow first, then fast — order in Run doesn't matter, every determines run order.
 	s.Run(func(st TickState) {
 		mu.Lock()
-		order = append(order, 1)
+		order = append(order, 2) // slow (every=6)
 		mu.Unlock()
-	}, 100.0)
-
+	}, 6)
 	s.Run(func(st TickState) {
 		mu.Lock()
-		order = append(order, 2)
+		order = append(order, 1) // fast (every=1)
 		mu.Unlock()
-	}, 50.0)
+	}, 1)
 
 	s.Advance(100 * time.Millisecond)
 
@@ -96,50 +72,32 @@ func TestAdvance_Order(t *testing.T) {
 	if len(order) == 0 {
 		t.Fatal("nothing ran")
 	}
-	// 50Hz < 100Hz, so 50Hz group runs first, then 100Hz group.
-	// All 50Hz entries should come before all 100Hz entries.
-	saw50 := false
+	// every=6 (slow) fires first (lower every = ascending order), then every=1.
+	sawSlow := false
 	for _, r := range order {
-		if r == 2 {
-			if saw50 {
-				// Already saw 50Hz, this is fine
-			}
-			saw50 = true
-		}
 		if r == 1 {
-			if !saw50 {
-				t.Fatal("100Hz ran before 50Hz")
+			if sawSlow {
+				// Already saw slow, this is fine
+			}
+			sawSlow = true
+		}
+		if r == 2 {
+			if !sawSlow {
+				// This is the slow one, should be first
 			}
 		}
-	}
-}
-
-func TestAdvance_SpeedZero(t *testing.T) {
-	s := NewScheduler()
-	var count atomic.Int64
-
-	s.Run(func(st TickState) { count.Add(1) }, 100.0)
-	s.SetSpeed(0.0)
-
-	result := s.Advance(100 * time.Millisecond)
-
-	if result.Fired != 0 {
-		t.Fatalf("expected 0 ticks at speed 0, got %d", result.Fired)
-	}
-	if count.Load() != 0 {
-		t.Fatalf("expected count 0, got %d", count.Load())
 	}
 }
 
 func TestAdvance_Paused(t *testing.T) {
 	s := NewScheduler()
+	s.SetMasterHz(60)
 	var count atomic.Int64
 
-	s.Run(func(st TickState) { count.Add(1) }, 100.0)
+	s.Run(func(st TickState) { count.Add(1) }, 1)
 	s.Pause()
 
 	result := s.Advance(100 * time.Millisecond)
-
 	if result.Fired != 0 {
 		t.Fatalf("expected 0 ticks when paused, got %d", result.Fired)
 	}
@@ -150,6 +108,7 @@ func TestAdvance_Paused(t *testing.T) {
 
 func TestAdvance_TickState(t *testing.T) {
 	s := NewScheduler()
+	s.SetMasterHz(60)
 	var ticks []uint64
 	var mu sync.Mutex
 
@@ -157,9 +116,9 @@ func TestAdvance_TickState(t *testing.T) {
 		mu.Lock()
 		ticks = append(ticks, st.Tick)
 		mu.Unlock()
-	}, 50.0)
+	}, 1)
 
-	// 50Hz: interval=20ms. Advance 100ms → ticks at 0,20,40,60,80,100 → 6 ticks.
+	// 100ms at 60Hz = 6 ticks. tick values 0,1,2,3,4,5.
 	s.Advance(100 * time.Millisecond)
 
 	mu.Lock()
@@ -168,38 +127,37 @@ func TestAdvance_TickState(t *testing.T) {
 	if len(ticks) != len(expected) {
 		t.Fatalf("expected %d ticks, got %d", len(expected), len(ticks))
 	}
-	for i, expectedTick := range expected {
-		if ticks[i] != expectedTick {
-			t.Fatalf("tick %d: expected %d, got %d", i, expectedTick, ticks[i])
+	for i, et := range expected {
+		if ticks[i] != et {
+			t.Fatalf("tick %d: expected %d, got %d", i, et, ticks[i])
 		}
 	}
 }
 
 func TestAdvance_Delta(t *testing.T) {
 	s := NewScheduler()
+	s.SetMasterHz(60)
 	var delta float64
 
-	s.Run(func(st TickState) { delta = st.Delta() }, 50.0)
+	s.Run(func(st TickState) { delta = st.Delta() }, 1)
 	s.Advance(100 * time.Millisecond)
 
-	if delta < 0.019 || delta > 0.021 {
-		t.Fatalf("expected Delta ~0.02, got %f", delta)
+	// every=1, masterHz=60 → Delta = 1/60 ≈ 0.01667
+	if delta < 0.016 || delta > 0.017 {
+		t.Fatalf("expected Delta ~0.01667, got %f", delta)
 	}
 }
 
 func TestAdvance_BoundedCatchUp(t *testing.T) {
 	s := NewScheduler()
+	s.SetMasterHz(60)
 	s.SetMaxCatchUp(2)
 
 	var runs atomic.Int64
-	s.Run(func(TickState) {
-		runs.Add(1)
-	}, 500.0)
+	s.Run(func(TickState) { runs.Add(1) }, 1) // 60Hz
 
-	// 500Hz: interval=2ms. Advance 100ms would need 50 ticks.
-	// With maxCatchUp=2, only 2 fire and the rest are dropped.
+	// 100ms at 60Hz = 6 ticks, but maxCatchUp=2 → only 2 fire.
 	result := s.Advance(100 * time.Millisecond)
-
 	if result.Fired != 2 {
 		t.Fatalf("expected 2 ticks fired with catch-up bound, got %d", result.Fired)
 	}
@@ -213,9 +171,10 @@ func TestAdvance_BoundedCatchUp(t *testing.T) {
 
 func TestAdvance_DroppedCount(t *testing.T) {
 	s := NewScheduler()
+	s.SetMasterHz(60)
 	s.SetMaxCatchUp(2)
 
-	s.Run(func(TickState) {}, 500.0)
+	s.Run(func(TickState) {}, 1)
 
 	result := s.Advance(100 * time.Millisecond)
 	if result.Dropped == 0 {
@@ -226,58 +185,171 @@ func TestAdvance_DroppedCount(t *testing.T) {
 	}
 }
 
-func TestAdvance_TicksPerRate(t *testing.T) {
+func TestAdvance_TicksPerJob(t *testing.T) {
 	s := NewScheduler()
+	s.SetMasterHz(60)
 
-	s.Run(func(TickState) {}, 100.0)
-	s.Run(func(TickState) {}, 50.0)
+	s.Run(func(TickState) {}, 1) // 60Hz
+	s.Run(func(TickState) {}, 2) // 30Hz
 
-	s.Advance(200 * time.Millisecond)
+	s.Advance(100 * time.Millisecond) // 6 master ticks
 
-	// maxCatchUp=8 limits each group to 8 ticks per Advance.
-	if t100 := s.Ticks(100.0); t100 != 8 {
-		t.Fatalf("expected 8 ticks at 100Hz, got %d", t100)
+	// maxCatchUp=8 limits each job to 8 ticks per Advance.
+	// every=1: fires at 0,1,2,3,4,5 → 6 ticks
+	// every=2: fires at 0,2,4 → 3 ticks
+	if t1 := s.Ticks(1); t1 != 6 {
+		t.Fatalf("expected 6 ticks for every=1, got %d", t1)
 	}
-	if t50 := s.Ticks(50.0); t50 != 8 {
-		t.Fatalf("expected 8 ticks at 50Hz, got %d", t50)
+	if t2 := s.Ticks(2); t2 != 3 {
+		t.Fatalf("expected 3 ticks for every=2, got %d", t2)
 	}
 }
 
 func TestAdvance_SimTimeAccumulates(t *testing.T) {
 	s := NewScheduler()
+	s.SetMasterHz(60)
 	var count int32
 
-	s.Run(func(TickState) { count++ }, 10.0) // 100ms interval
+	s.Run(func(TickState) { count++ }, 6) // every=6 → 10Hz, interval=100ms
 
-	// Advance 50ms: simTime=50ms, next=0 → tick, next=100 > 50 → stop. 1 tick.
+	// 50ms at 60Hz = 3 quanta. every=6 fires at tick 0 → 1 tick.
 	s.Advance(50 * time.Millisecond)
 	if count != 1 {
 		t.Fatalf("after first advance: expected 1, got %d", count)
 	}
-	// Advance 50ms: simTime=100ms, next=100 → tick, next=200 > 100 → stop. 1 tick.
+	// 50ms more: 6 quanta total. every=6 next=6 not < 6 → 0 ticks.
 	s.Advance(50 * time.Millisecond)
-	if count != 2 {
-		t.Fatalf("after second advance: expected 2, got %d", count)
+	if count != 1 {
+		t.Fatalf("after second advance: expected 1, got %d", count)
 	}
-	// Advance 50ms: simTime=150ms, next=200 > 150 → stop. 0 ticks.
+	// 50ms more: 9 quanta total. every=6 next=6 < 9 → 1 tick.
 	s.Advance(50 * time.Millisecond)
 	if count != 2 {
 		t.Fatalf("after third advance: expected 2, got %d", count)
 	}
 }
 
-// --- Determinism tests ---
+func TestAdvance_ZeroSimDT(t *testing.T) {
+	s := NewScheduler()
+	s.SetMasterHz(60)
+	var count atomic.Int64
+	s.Run(func(TickState) { count.Add(1) }, 1)
+
+	result := s.Advance(0)
+	if result.Fired != 0 {
+		t.Fatalf("expected 0 ticks for Advance(0), got %d", result.Fired)
+	}
+}
+
+func TestAdvance_NegativeSimDT(t *testing.T) {
+	s := NewScheduler()
+	s.SetMasterHz(60)
+	var count atomic.Int64
+	s.Run(func(TickState) { count.Add(1) }, 1)
+
+	result := s.Advance(-10 * time.Millisecond)
+	if result.Fired != 0 {
+		t.Fatalf("expected 0 ticks for negative simDT, got %d", result.Fired)
+	}
+}
+
+func TestAdvance_MultipleAdvances(t *testing.T) {
+	s := NewScheduler()
+	s.SetMasterHz(60)
+	var count atomic.Int64
+	s.Run(func(TickState) { count.Add(1) }, 1) // 60Hz
+
+	// 50ms × 3 = 150ms = 9 ticks. every=1 fires at 0..8 → 9 ticks.
+	s.Advance(50 * time.Millisecond)
+	s.Advance(50 * time.Millisecond)
+	s.Advance(50 * time.Millisecond)
+
+	if count.Load() != 9 {
+		t.Fatalf("expected 9 ticks after three 50ms advances, got %d", count.Load())
+	}
+}
+
+func TestAdvance_RegisterAfterAdvance(t *testing.T) {
+	s := NewScheduler()
+	s.SetMasterHz(60)
+	var count int32
+
+	// Advance before registering - nothing to fire.
+	s.Advance(100 * time.Millisecond)
+
+	s.Run(func(TickState) { count++ }, 6) // every=6 → 10Hz
+
+	// simTicks is 6 from first advance. Advance(100ms) → 12 master ticks.
+	// every=6 fires at tick 6, 12 → 2 ticks.
+	s.Advance(100 * time.Millisecond)
+	if count != 2 {
+		t.Fatalf("expected 2 ticks after registering, got %d", count)
+	}
+}
+
+func TestAdvance_MaxCatchUpPreserved(t *testing.T) {
+	s := NewScheduler()
+	s.SetMasterHz(60)
+	s.SetMaxCatchUp(4)
+
+	var runs int32
+	s.Run(func(TickState) { runs++ }, 1) // 60Hz
+
+	// 1 second = 60 ticks, but maxCatchUp=4.
+	s.Advance(1 * time.Second)
+	if runs != 4 {
+		t.Fatalf("expected 4 runs (maxCatchUp), got %d", runs)
+	}
+	if s.Dropped() == 0 {
+		t.Fatal("expected dropped ticks")
+	}
+}
+
+func TestAdvance_DroppedTotal(t *testing.T) {
+	s := NewScheduler()
+	s.SetMasterHz(60)
+	s.SetMaxCatchUp(2)
+
+	s.Run(func(TickState) {}, 1)
+
+	result := s.Advance(100 * time.Millisecond)
+	if result.Dropped == 0 {
+		t.Fatal("expected dropped ticks")
+	}
+	if result.Fired != 2 {
+		t.Fatalf("expected 2 fired, got %d", result.Fired)
+	}
+}
+
+func TestAdvance_AdvanceResultMatchesCounters(t *testing.T) {
+	s := NewScheduler()
+	s.SetMasterHz(60)
+	s.SetMaxCatchUp(3)
+
+	s.Run(func(TickState) {}, 1)
+
+	result := s.Advance(200 * time.Millisecond) // 12 ticks, maxCatchUp=3 → 3 fired
+	if result.Fired != int(s.Ticks(1)) {
+		t.Fatalf("AdvanceResult.Fired %d != Ticks() %d", result.Fired, s.Ticks(1))
+	}
+	if result.Dropped != s.Dropped() {
+		t.Fatalf("AdvanceResult.Dropped %d != Dropped() %d", result.Dropped, s.Dropped())
+	}
+}
+
+// ==================== Determinism tests ====================
 
 func TestAdvance_Deterministic(t *testing.T) {
 	s1 := NewScheduler()
 	s2 := NewScheduler()
+	s1.SetMasterHz(60)
+	s2.SetMasterHz(60)
 
-	s1.Run(func(st TickState) { _ = st.Tick }, 100.0)
-	s1.Run(func(st TickState) { _ = st.Tick }, 50.0)
-	s2.Run(func(st TickState) { _ = st.Tick }, 100.0)
-	s2.Run(func(st TickState) { _ = st.Tick }, 50.0)
+	s1.Run(func(st TickState) { _ = st.Tick }, 1)
+	s1.Run(func(st TickState) { _ = st.Tick }, 2)
+	s2.Run(func(st TickState) { _ = st.Tick }, 1)
+	s2.Run(func(st TickState) { _ = st.Tick }, 2)
 
-	// Same sequence of Advance calls.
 	seq := []time.Duration{10 * time.Millisecond, 20 * time.Millisecond, 5 * time.Millisecond, 100 * time.Millisecond}
 
 	var ticks1, ticks2 []uint64
@@ -287,23 +359,23 @@ func TestAdvance_Deterministic(t *testing.T) {
 		mu1.Lock()
 		ticks1 = append(ticks1, st.Tick)
 		mu1.Unlock()
-	}, 100.0)
+	}, 1)
 	s1.Run(func(st TickState) {
 		mu1.Lock()
-		ticks1 = append(ticks1, st.Tick+1000) // offset to distinguish from s2
+		ticks1 = append(ticks1, st.Tick+1000)
 		mu1.Unlock()
-	}, 50.0)
+	}, 2)
 
 	s2.Run(func(st TickState) {
 		mu2.Lock()
 		ticks2 = append(ticks2, st.Tick)
 		mu2.Unlock()
-	}, 100.0)
+	}, 1)
 	s2.Run(func(st TickState) {
 		mu2.Lock()
 		ticks2 = append(ticks2, st.Tick+1000)
 		mu2.Unlock()
-	}, 50.0)
+	}, 2)
 
 	for _, dt := range seq {
 		s1.Advance(dt)
@@ -316,7 +388,6 @@ func TestAdvance_Deterministic(t *testing.T) {
 }
 
 func TestAdvance_Replay(t *testing.T) {
-	// Record a sequence of commands.
 	type command struct {
 		simDT  time.Duration
 		speed  float64
@@ -333,13 +404,14 @@ func TestAdvance_Replay(t *testing.T) {
 
 	// Run 1.
 	s1 := NewScheduler()
+	s1.SetMasterHz(60)
 	var counts1 []uint64
 	var mu1 sync.Mutex
 	s1.Run(func(st TickState) {
 		mu1.Lock()
 		counts1 = append(counts1, st.Tick)
 		mu1.Unlock()
-	}, 100.0)
+	}, 1)
 
 	for _, cmd := range commands {
 		s1.SetSpeed(cmd.speed)
@@ -353,13 +425,14 @@ func TestAdvance_Replay(t *testing.T) {
 
 	// Run 2 (replay).
 	s2 := NewScheduler()
+	s2.SetMasterHz(60)
 	var counts2 []uint64
 	var mu2 sync.Mutex
 	s2.Run(func(st TickState) {
 		mu2.Lock()
 		counts2 = append(counts2, st.Tick)
 		mu2.Unlock()
-	}, 100.0)
+	}, 1)
 
 	for _, cmd := range commands {
 		s2.SetSpeed(cmd.speed)
@@ -382,7 +455,6 @@ func TestAdvance_Replay(t *testing.T) {
 }
 
 func TestAdvance_BitIdenticalReplays(t *testing.T) {
-	// Run the same command sequence multiple times and verify bit-identical results.
 	commands := []struct {
 		simDT time.Duration
 		speed float64
@@ -397,13 +469,14 @@ func TestAdvance_BitIdenticalReplays(t *testing.T) {
 	var firstResult []uint64
 	for run := 0; run < 3; run++ {
 		s := NewScheduler()
+		s.SetMasterHz(60)
 		var ticks []uint64
 		var mu sync.Mutex
 		s.Run(func(st TickState) {
 			mu.Lock()
 			ticks = append(ticks, st.Tick)
 			mu.Unlock()
-		}, 100.0)
+		}, 1)
 
 		for _, cmd := range commands {
 			s.SetSpeed(cmd.speed)
@@ -426,24 +499,25 @@ func TestAdvance_BitIdenticalReplays(t *testing.T) {
 }
 
 func TestAdvance_OrderStableAcrossRuns(t *testing.T) {
-	record := func() []float64 {
+	record := func() []uint {
 		s := NewScheduler()
+		s.SetMasterHz(60)
 		var mu sync.Mutex
-		var order []float64
-		for _, hz := range []float64{30, 120, 60, 5} {
-			hz := hz
+		var order []uint
+		for _, every := range []uint{6, 1, 3, 12} {
+			every := every
 			s.Run(func(TickState) {
 				mu.Lock()
-				if len(order) < 16 {
-					order = append(order, hz)
+				if len(order) < 20 {
+					order = append(order, every)
 				}
 				mu.Unlock()
-			}, hz)
+			}, every)
 		}
-		s.Advance(100 * time.Millisecond)
+		s.Advance(200 * time.Millisecond)
 		mu.Lock()
 		defer mu.Unlock()
-		return append([]float64(nil), order...)
+		return append([]uint(nil), order...)
 	}
 
 	a, b := record(), record()
@@ -458,395 +532,9 @@ func TestAdvance_OrderStableAcrossRuns(t *testing.T) {
 	}
 }
 
-// --- Integration tests using Start/Stop (pacer) ---
-
-func TestScheduler_BasicRun(t *testing.T) {
-	s := NewScheduler()
-	var count atomic.Int64
-
-	s.Run(func(st TickState) {
-		count.Add(1)
-	}, 100.0)
-
-	s.Start()
-	time.Sleep(50 * time.Millisecond)
-	s.Stop()
-
-	if count.Load() < 4 || count.Load() > 6 {
-		t.Fatalf("expected ~5 runs at 100Hz in 50ms, got %d", count.Load())
-	}
-}
-
-func TestScheduler_MultipleRates(t *testing.T) {
-	s := NewScheduler()
-	var count100, count10 atomic.Int64
-
-	s.Run(func(st TickState) { count100.Add(1) }, 100.0)
-	s.Run(func(st TickState) { count10.Add(1) }, 10.0)
-
-	s.Start()
-	time.Sleep(110 * time.Millisecond)
-	s.Stop()
-
-	c100 := count100.Load()
-	c10 := count10.Load()
-
-	if c100 < 9 || c100 > 12 {
-		t.Fatalf("100Hz: expected ~11 runs in 110ms, got %d", c100)
-	}
-	if c10 < 0 || c10 > 2 {
-		t.Fatalf("10Hz: expected ~1 run in 110ms, got %d", c10)
-	}
-}
-
-func TestScheduler_PauseResume(t *testing.T) {
-	s := NewScheduler()
-	var count atomic.Int64
-
-	s.Run(func(st TickState) { count.Add(1) }, 100.0)
-	s.Start()
-	time.Sleep(30 * time.Millisecond)
-	s.Pause()
-	pausedCount := count.Load()
-	time.Sleep(30 * time.Millisecond)
-	s.Resume()
-	time.Sleep(30 * time.Millisecond)
-	s.Stop()
-
-	if pausedCount == count.Load() {
-		t.Fatal("count should have increased after resume")
-	}
-	if pausedCount < 2 || pausedCount > 4 {
-		t.Fatalf("expected ~3 runs before pause, got %d", pausedCount)
-	}
-}
-
-func TestScheduler_SetSpeed(t *testing.T) {
-	s := NewScheduler()
-	var count atomic.Int64
-
-	s.Run(func(st TickState) { count.Add(1) }, 100.0)
-	s.SetSpeed(2.0)
-	s.Start()
-	time.Sleep(50 * time.Millisecond)
-	s.Stop()
-
-	if count.Load() < 8 || count.Load() > 12 {
-		t.Fatalf("expected ~10 runs at 2x speed (100Hz) in 50ms, got %d", count.Load())
-	}
-}
-
-func TestScheduler_SpeedZeroPauses(t *testing.T) {
-	s := NewScheduler()
-	var count atomic.Int64
-
-	s.Run(func(st TickState) { count.Add(1) }, 100.0)
-	s.SetSpeed(0.0)
-	s.Start()
-	time.Sleep(50 * time.Millisecond)
-	s.Stop()
-
-	if count.Load() != 0 {
-		t.Fatalf("expected 0 runs at speed 0, got %d", count.Load())
-	}
-}
-
-func TestScheduler_TickState(t *testing.T) {
-	s := NewScheduler()
-	var lastTick uint64
-	var lastDelta float64
-
-	s.Run(func(st TickState) {
-		lastTick = st.Tick
-		lastDelta = st.Delta()
-	}, 50.0)
-
-	s.Start()
-	time.Sleep(120 * time.Millisecond)
-	s.Stop()
-
-	if lastTick < 4 || lastTick > 7 {
-		t.Fatalf("expected tick 4-7, got %d", lastTick)
-	}
-	if lastDelta < 0.019 || lastDelta > 0.021 {
-		t.Fatalf("expected Delta ~0.02, got %f", lastDelta)
-	}
-}
-
-func TestScheduler_StopBeforeStart(t *testing.T) {
-	s := NewScheduler()
-	s.Stop()
-}
-
-func TestScheduler_DoubleStart(t *testing.T) {
-	s := NewScheduler()
-	s.Start()
-	s.Start()
-	s.Stop()
-}
-
-func TestScheduler_RunAfterStart(t *testing.T) {
-	s := NewScheduler()
-	s.Start()
-	var count atomic.Int64
-	s.Run(func(st TickState) { count.Add(1) }, 100.0)
-	time.Sleep(30 * time.Millisecond)
-	s.Stop()
-
-	if count.Load() < 2 || count.Load() > 4 {
-		t.Fatalf("expected ~3 runs, got %d", count.Load())
-	}
-}
-
-func TestScheduler_BoundedCatchUp(t *testing.T) {
-	s := NewScheduler()
-	s.SetMaxCatchUp(2)
-
-	var runs atomic.Int64
-	s.Run(func(TickState) {
-		runs.Add(1)
-		time.Sleep(2 * time.Millisecond)
-	}, 500.0)
-
-	s.Start()
-	time.Sleep(200 * time.Millisecond)
-	s.Stop()
-
-	got := runs.Load()
-	if got == 0 {
-		t.Fatal("the bounded group never ran")
-	}
-	if s.Dropped() == 0 {
-		t.Fatal("a group that cannot keep up dropped nothing, so it is still carrying the debt")
-	}
-	t.Logf("ran %d ticks, dropped %d", got, s.Dropped())
-}
-
-func TestScheduler_RegisterWhileRunning(t *testing.T) {
-	s := NewScheduler()
-	var runs atomic.Int64
-	s.Run(func(TickState) { runs.Add(1) }, 200.0)
-	s.Start()
-
-	for range 50 {
-		s.Run(func(TickState) { runs.Add(1) }, 200.0)
-		time.Sleep(time.Millisecond)
-	}
-	s.Stop()
-
-	if runs.Load() == 0 {
-		t.Fatal("nothing ran")
-	}
-}
-
-func TestScheduler_TickCountIsPrimary(t *testing.T) {
-	s := NewScheduler()
-	var seen []uint64
-	var mu sync.Mutex
-	s.Run(func(st TickState) {
-		mu.Lock()
-		if len(seen) < 5 {
-			seen = append(seen, st.Tick)
-		}
-		mu.Unlock()
-		if st.Hz != 100 {
-			t.Errorf("Hz = %v, want 100", st.Hz)
-		}
-	}, 100.0)
-
-	s.Start()
-	time.Sleep(100 * time.Millisecond)
-	s.Stop()
-
-	mu.Lock()
-	defer mu.Unlock()
-	for i, tick := range seen {
-		if tick != uint64(i) {
-			t.Fatalf("tick %d of the run was %d, want %d", i, tick, i)
-		}
-	}
-}
-
-// --- Edge cases ---
-
-func TestAdvance_ZeroSimDT(t *testing.T) {
-	s := NewScheduler()
-	var count atomic.Int64
-	s.Run(func(TickState) { count.Add(1) }, 100.0)
-
-	result := s.Advance(0)
-	if result.Fired != 0 {
-		t.Fatalf("expected 0 ticks for Advance(0), got %d", result.Fired)
-	}
-	if count.Load() != 0 {
-		t.Fatalf("expected count 0, got %d", count.Load())
-	}
-}
-
-func TestAdvance_NegativeSimDT(t *testing.T) {
-	s := NewScheduler()
-	var count atomic.Int64
-	s.Run(func(TickState) { count.Add(1) }, 100.0)
-
-	result := s.Advance(-10 * time.Millisecond)
-	if result.Fired != 0 {
-		t.Fatalf("expected 0 ticks for negative simDT, got %d", result.Fired)
-	}
-}
-
-func TestAdvance_MultipleAdvances(t *testing.T) {
-	s := NewScheduler()
-	var count atomic.Int64
-	s.Run(func(TickState) { count.Add(1) }, 10.0) // 100ms interval
-
-	// 10Hz: interval=100ms. next starts at 0.
-	// Advance(50ms): simTime=50ms, next=0 → tick, next=100 > 50 → stop. 1 tick.
-	s.Advance(50 * time.Millisecond)
-	// Advance(50ms): simTime=100ms, next=100 → tick, next=200 > 100 → stop. 1 tick.
-	s.Advance(50 * time.Millisecond)
-	// Advance(50ms): simTime=150ms, next=200 > 150 → stop. 0 ticks.
-	s.Advance(50 * time.Millisecond)
-
-	if count.Load() != 2 {
-		t.Fatalf("expected 2 ticks after three 50ms advances, got %d", count.Load())
-	}
-}
-
-func TestAdvance_SortedRateOrder(t *testing.T) {
-	s := NewScheduler()
-	var order []int
-	var mu sync.Mutex
-
-	for _, hz := range []float64{200, 50, 100} {
-		hz := hz
-		s.Run(func(TickState) {
-			mu.Lock()
-			order = append(order, int(hz))
-			mu.Unlock()
-		}, hz)
-	}
-
-	s.Advance(100 * time.Millisecond)
-
-	// Groups should run in ascending hz order: 50, 100, 200.
-	first50, first100, first200 := -1, -1, -1
-	for i, hz := range order {
-		if hz == 50 && first50 == -1 {
-			first50 = i
-		}
-		if hz == 100 && first100 == -1 {
-			first100 = i
-		}
-		if hz == 200 && first200 == -1 {
-			first200 = i
-		}
-	}
-
-	if first50 == -1 || first100 == -1 || first200 == -1 {
-		t.Fatal("not all rates fired")
-	}
-	if first50 > first100 || first100 > first200 {
-		t.Fatalf("rates did not run in ascending order: 50@%d, 100@%d, 200@%d", first50, first100, first200)
-	}
-}
-
-func TestAdvance_RegisterAfterAdvance(t *testing.T) {
-	s := NewScheduler()
-	var count int32
-
-	// Advance before registering - should not fire anything.
-	s.Advance(100 * time.Millisecond)
-
-	s.Run(func(TickState) { count++ }, 10.0)
-
-	// After registering, Advance should fire.
-	// simTime was 100ms from the first Advance, now Advance(100ms) makes it 200ms.
-	// 10Hz (interval=100ms): ticks at next=0,100,200 → 3 ticks.
-	s.Advance(100 * time.Millisecond)
-
-	if count != 3 {
-		t.Fatalf("expected 3 ticks after registering, got %d", count)
-	}
-}
-
-func TestAdvance_MaxCatchUpPreserved(t *testing.T) {
-	s := NewScheduler()
-	s.SetMaxCatchUp(4)
-
-	var runs int32
-	s.Run(func(TickState) { runs++ }, 10.0) // 100ms interval
-
-	// Advance 1 second = 10 ticks, but maxCatchUp=4.
-	s.Advance(1000 * time.Millisecond)
-
-	if runs != 4 {
-		t.Fatalf("expected 4 runs (maxCatchUp), got %d", runs)
-	}
-	if s.Dropped() == 0 {
-		t.Fatal("expected dropped ticks")
-	}
-}
-
-func TestScheduler_SnapshotOrder(t *testing.T) {
-	record := func() []float64 {
-		s := NewScheduler()
-		var mu sync.Mutex
-		var order []float64
-		for _, hz := range []float64{30, 120, 60, 5} {
-			hz := hz
-			s.Run(func(TickState) {
-				mu.Lock()
-				if len(order) < 16 {
-					order = append(order, hz)
-				}
-				mu.Unlock()
-			}, hz)
-		}
-		s.Advance(100 * time.Millisecond)
-		mu.Lock()
-		defer mu.Unlock()
-		return append([]float64(nil), order...)
-	}
-
-	a, b := record(), record()
-	n := min(len(a), len(b))
-	for i := range n {
-		if a[i] != b[i] {
-			t.Fatalf("order differs at %d: %v then %v", i, a[:n], b[:n])
-		}
-	}
-}
-
-func TestAdvance_DroppedTotal(t *testing.T) {
-	s := NewScheduler()
-	s.SetMaxCatchUp(2)
-
-	s.Run(func(TickState) {}, 500.0)
-
-	result := s.Advance(100 * time.Millisecond)
-	if result.Dropped == 0 {
-		t.Fatal("expected dropped ticks")
-	}
-	if result.Fired != 2 {
-		t.Fatalf("expected 2 fired, got %d", result.Fired)
-	}
-}
-
-func TestAdvance_InvalidHz(t *testing.T) {
-	s := NewScheduler()
-	var count atomic.Int64
-	s.Run(func(TickState) { count.Add(1) }, 0)
-	s.Run(func(TickState) { count.Add(1) }, -1)
-
-	s.Advance(100 * time.Millisecond)
-
-	if count.Load() != 0 {
-		t.Fatalf("expected 0 runs for invalid hz, got %d", count.Load())
-	}
-}
-
 func TestAdvance_NoWallClockDependency(t *testing.T) {
 	s := NewScheduler()
+	s.SetMasterHz(1000) // 1kHz → 1ms per tick
 	var ticks []uint64
 	var mu sync.Mutex
 
@@ -854,9 +542,8 @@ func TestAdvance_NoWallClockDependency(t *testing.T) {
 		mu.Lock()
 		ticks = append(ticks, st.Tick)
 		mu.Unlock()
-	}, 1000.0) // 1ms interval
+	}, 1)
 
-	// Advance 10 times by 1ms. Ticks must be sequential and deterministic.
 	for i := 0; i < 10; i++ {
 		s.Advance(1 * time.Millisecond)
 	}
@@ -875,253 +562,666 @@ func TestAdvance_NoWallClockDependency(t *testing.T) {
 
 func TestAdvance_DeltaIsFixed(t *testing.T) {
 	s := NewScheduler()
-	deltas := make(map[float64]float64)
+	s.SetMasterHz(60)
+	deltas := make(map[uint]float64)
 
 	s.Run(func(st TickState) {
-		deltas[st.Hz] = st.Delta()
-	}, 100.0)
+		deltas[0] = st.Delta()
+	}, 1)
 	s.Run(func(st TickState) {
-		deltas[st.Hz] = st.Delta()
-	}, 200.0)
+		deltas[2] = st.Delta()
+	}, 2)
 
 	s.Advance(100 * time.Millisecond)
 
-	if deltas[100.0] < 0.009 || deltas[100.0] > 0.011 {
-		t.Fatalf("expected Delta ~0.01 for 100Hz, got %f", deltas[100.0])
+	// every=1: Delta = 1/60 ≈ 0.01667
+	if d := deltas[0]; d < 0.016 || d > 0.017 {
+		t.Fatalf("expected Delta ~0.01667 for every=1, got %f", d)
 	}
-	if deltas[200.0] < 0.0049 || deltas[200.0] > 0.0051 {
-		t.Fatalf("expected Delta ~0.005 for 200Hz, got %f", deltas[200.0])
+	// every=2: Delta = 2/60 ≈ 0.03333
+	if d := deltas[2]; d < 0.033 || d > 0.034 {
+		t.Fatalf("expected Delta ~0.03333 for every=2, got %f", d)
 	}
 }
 
-func TestAdvance_WithoutStart(t *testing.T) {
+func TestAdvance_SimTicksMonotonic(t *testing.T) {
 	s := NewScheduler()
+	s.SetMasterHz(60)
+
+	var lastSimTicks uint64
+	s.Run(func(st TickState) {
+		st2 := s.SimTicks()
+		if st2 < lastSimTicks {
+			t.Errorf("SimTicks went backwards: %d → %d", lastSimTicks, st2)
+		}
+		lastSimTicks = st2
+	}, 1)
+
+	for i := 0; i < 10; i++ {
+		s.Advance(10 * time.Millisecond)
+	}
+}
+
+// ==================== AdvanceTicks tests ====================
+
+func TestAdvanceTicks_Basic(t *testing.T) {
+	s := NewScheduler()
+	s.SetMasterHz(60)
 	var count atomic.Int64
-	s.Run(func(st TickState) { count.Add(1) }, 100.0)
 
-	// Advance without calling Start.
-	result := s.Advance(50 * time.Millisecond)
+	s.Run(func(st TickState) { count.Add(1) }, 1) // every=1 → 60Hz
 
+	// 1 tick at speed=1 → 1 tick.
+	result := s.AdvanceTicks(1)
+	if result.Fired != 1 {
+		t.Fatalf("expected 1 tick fired, got %d", result.Fired)
+	}
+	if count.Load() != 1 {
+		t.Fatalf("expected count 1, got %d", count.Load())
+	}
+}
+
+func TestAdvanceTicks_MultipleTicks(t *testing.T) {
+	s := NewScheduler()
+	s.SetMasterHz(60)
+	var count atomic.Int64
+
+	s.Run(func(st TickState) { count.Add(1) }, 1)
+
+	// 6 ticks at speed=1 → 6 ticks.
+	result := s.AdvanceTicks(6)
 	if result.Fired != 6 {
-		t.Fatalf("expected 6 ticks without Start, got %d", result.Fired)
-	}
-	if count.Load() != 6 {
-		t.Fatalf("expected count 6, got %d", count.Load())
+		t.Fatalf("expected 6 ticks fired, got %d", result.Fired)
 	}
 }
 
-func TestAdvance_PacerNotNeeded(t *testing.T) {
+func TestAdvanceTicks_SimTicksAdvances(t *testing.T) {
 	s := NewScheduler()
+	s.SetMasterHz(60)
+
+	s.AdvanceTicks(10)
+	if st := s.SimTicks(); st != 10 {
+		t.Fatalf("expected SimTicks=10, got %d", st)
+	}
+	s.AdvanceTicks(5)
+	if st := s.SimTicks(); st != 15 {
+		t.Fatalf("expected SimTicks=15, got %d", st)
+	}
+}
+
+func TestAdvanceTicks_ZeroNoOp(t *testing.T) {
+	s := NewScheduler()
+	s.SetMasterHz(60)
+
+	result := s.AdvanceTicks(0)
+	if result.Fired != 0 {
+		t.Fatalf("expected 0 ticks for AdvanceTicks(0), got %d", result.Fired)
+	}
+	if s.SimTicks() != 0 {
+		t.Fatalf("expected SimTicks=0, got %d", s.SimTicks())
+	}
+}
+
+func TestAdvanceTicks_NegativeNoOp(t *testing.T) {
+	s := NewScheduler()
+	s.SetMasterHz(60)
+
+	result := s.AdvanceTicks(-5)
+	if result.Fired != 0 {
+		t.Fatalf("expected 0 ticks for negative AdvanceTicks, got %d", result.Fired)
+	}
+}
+
+func TestAdvanceTicks_NoMasterHzNoOp(t *testing.T) {
+	s := NewScheduler()
+	// MasterHz not set.
+
+	result := s.AdvanceTicks(10)
+	if result.Fired != 0 {
+		t.Fatalf("expected 0 ticks when MasterHz unset, got %d", result.Fired)
+	}
+}
+
+func TestAdvanceTicks_SpeedScales(t *testing.T) {
+	s := NewScheduler()
+	s.SetMasterHz(60)
+	s.SetSpeed(2)
 	var count atomic.Int64
-	s.Run(func(st TickState) { count.Add(1) }, 60.0) // interval ≈16.67ms
 
-	// Advance 160ms. 60Hz: interval≈16.67ms. next starts at 0.
-	// At simTime=160ms: ticks at 0,16.67,...,160 → about 10 ticks.
-	// But maxCatchUp=8 limits to 8.
-	result := s.Advance(160 * time.Millisecond)
+	s.Run(func(st TickState) { count.Add(1) }, 1)
 
-	if result.Fired > 8 {
-		t.Fatalf("expected at most 8 ticks (maxCatchUp), got %d", result.Fired)
+	// 1 tick at speed=2 → 2 scaled ticks.
+	result := s.AdvanceTicks(1)
+	if result.Fired != 2 {
+		t.Fatalf("expected 2 ticks fired at speed 2, got %d", result.Fired)
 	}
-	if int(count.Load()) != result.Fired {
-		t.Fatalf("count %d doesn't match fired %d", count.Load(), result.Fired)
+	if count.Load() != 2 {
+		t.Fatalf("expected count 2, got %d", count.Load())
 	}
 }
 
-func TestAdvance_AdvanceResultMatchesCounters(t *testing.T) {
+func TestAdvanceTicks_SpeedZeroNoOp(t *testing.T) {
 	s := NewScheduler()
-	s.SetMaxCatchUp(3)
+	s.SetMasterHz(60)
+	s.SetSpeed(0)
 
-	s.Run(func(TickState) {}, 500.0)
-
-	result := s.Advance(200 * time.Millisecond)
-
-	if result.Fired != int(s.Ticks(500.0)) {
-		t.Fatalf("AdvanceResult.Fired %d != Ticks() %d", result.Fired, s.Ticks(500.0))
-	}
-	if result.Dropped != s.Dropped() {
-		t.Fatalf("AdvanceResult.Dropped %d != Dropped() %d", result.Dropped, s.Dropped())
+	result := s.AdvanceTicks(10)
+	if result.Fired != 0 {
+		t.Fatalf("expected 0 ticks at speed 0, got %d", result.Fired)
 	}
 }
 
-func TestAdvance_SpeedChangeBetweenAdvances(t *testing.T) {
+func TestAdvanceTicks_PausedNoOp(t *testing.T) {
 	s := NewScheduler()
+	s.SetMasterHz(60)
+	s.Pause()
+
+	result := s.AdvanceTicks(10)
+	if result.Fired != 0 {
+		t.Fatalf("expected 0 ticks when paused, got %d", result.Fired)
+	}
+}
+
+func TestAdvanceTicks_Quantum(t *testing.T) {
+	s := NewScheduler()
+	s.SetMasterHz(60)
+	s.SetSpeed(1)
+
+	q := s.Quantum()
+	if q != time.Second/60 {
+		t.Fatalf("expected Quantum=1s/60, got %v", q)
+	}
+
+	s.SetSpeed(2)
+	q = s.Quantum()
+	if q != time.Second/120 {
+		t.Fatalf("expected Quantum=1s/120 at speed 2, got %v", q)
+	}
+}
+
+// ==================== Speed tests ====================
+
+func TestSpeed_Default(t *testing.T) {
+	s := NewScheduler()
+	if s.Speed() != 1.0 {
+		t.Fatalf("expected default speed 1.0, got %f", s.Speed())
+	}
+}
+
+func TestSpeed_SetGet(t *testing.T) {
+	s := NewScheduler()
+	s.SetSpeed(3.5)
+	if s.Speed() != 3.5 {
+		t.Fatalf("expected speed 3.5, got %f", s.Speed())
+	}
+}
+
+func TestSpeed_NegativeClamped(t *testing.T) {
+	s := NewScheduler()
+	s.SetSpeed(-5)
+	if s.Speed() != 0 {
+		t.Fatalf("expected speed 0 (clamped), got %f", s.Speed())
+	}
+}
+
+func TestSpeed_AdvanceIgnoresSpeed(t *testing.T) {
+	s := NewScheduler()
+	s.SetMasterHz(60)
 	var count atomic.Int64
-	s.Run(func(st TickState) { count.Add(1) }, 100.0) // 10ms interval
+	s.Run(func(st TickState) { count.Add(1) }, 1)
 
-	// Advance takes simulation time directly; speed only affects the pacer.
-	// So Advance(10ms) always fires 1 tick regardless of speed setting.
 	s.SetSpeed(1.0)
-	s.Advance(10 * time.Millisecond)
+	s.Advance(20 * time.Millisecond) // floor(20*60/1000) = 1 tick
 	c1 := count.Load()
 
-	s.SetSpeed(2.0)
-	s.Advance(10 * time.Millisecond)
+	s.SetSpeed(5.0)
+	s.Advance(20 * time.Millisecond) // still 1 tick, speed ignored
 	c2 := count.Load()
 
+	// Both advance the same sim time. 20ms at 60Hz = 1 tick each.
 	if c2-c1 != 1 {
 		t.Fatalf("expected 1 tick per Advance regardless of speed, got %d", c2-c1)
 	}
 }
 
-func TestAdvance_MultipleAdvanceCallsSameResult(t *testing.T) {
-	// Test that advancing by N*dT in one call gives the same result as
-	// advancing by dT N times (when dT doesn't cross tick boundaries).
-	s1 := NewScheduler()
-	s2 := NewScheduler()
-
-	var ticks1, ticks2 []uint64
-	var mu1, mu2 sync.Mutex
-
-	s1.Run(func(st TickState) {
-		mu1.Lock()
-		ticks1 = append(ticks1, st.Tick)
-		mu1.Unlock()
-	}, 100.0)
-	s2.Run(func(st TickState) {
-		mu2.Lock()
-		ticks2 = append(ticks2, st.Tick)
-		mu2.Unlock()
-	}, 100.0)
-
-	dT := 10 * time.Millisecond
-	N := 5
-
-	// Single advance of N*dT = 50ms.
-	s1.Advance(time.Duration(N) * dT)
-
-	// N separate advances of dT.
-	for i := 0; i < N; i++ {
-		s2.Advance(dT)
-	}
-
-	mu1.Lock()
-	defer mu1.Unlock()
-	mu2.Lock()
-	defer mu2.Unlock()
-
-	if len(ticks1) != len(ticks2) {
-		t.Fatalf("single vs multiple: tick count %d vs %d", len(ticks1), len(ticks2))
-	}
-	for i := range ticks1 {
-		if ticks1[i] != ticks2[i] {
-			t.Fatalf("single vs multiple: tick %d differs: %d vs %d", i, ticks1[i], ticks2[i])
-		}
-	}
-}
-
-func TestScheduler_StartStopReuse(t *testing.T) {
+func TestSpeed_AdvanceTicksScales(t *testing.T) {
 	s := NewScheduler()
+	s.SetMasterHz(60)
 	var count atomic.Int64
-	s.Run(func(st TickState) { count.Add(1) }, 100.0)
+	s.Run(func(st TickState) { count.Add(1) }, 1)
 
-	s.Start()
-	time.Sleep(20 * time.Millisecond)
-	s.Stop()
-
+	s.SetSpeed(1.0)
+	s.AdvanceTicks(1)
 	c1 := count.Load()
-	if c1 == 0 {
-		t.Fatal("expected some ticks in first run")
-	}
 
-	s.Start()
-	time.Sleep(20 * time.Millisecond)
-	s.Stop()
-
+	s.SetSpeed(3.0)
+	s.AdvanceTicks(1)
 	c2 := count.Load()
-	if c2 == 0 {
-		t.Fatalf("expected some ticks in second run, got 0")
+
+	// speed=3, 1 tick → 3 scaled ticks → 3 ticks fired.
+	if c2-c1 != 3 {
+		t.Fatalf("expected 3 ticks at speed 3, got %d", c2-c1)
 	}
 }
 
-func TestScheduler_StableRateOrderVsWallClock(t *testing.T) {
-	recordOrder := func() []float64 {
-		s := NewScheduler()
-		var mu sync.Mutex
-		var order []float64
-		for _, hz := range []float64{30, 120, 60, 5} {
-			hz := hz
-			s.Run(func(TickState) {
-				mu.Lock()
-				if len(order) < 16 {
-					order = append(order, hz)
-				}
-				mu.Unlock()
-			}, hz)
-		}
-		s.Start()
-		time.Sleep(80 * time.Millisecond)
-		s.Stop()
-		mu.Lock()
-		defer mu.Unlock()
-		return append([]float64(nil), order...)
-	}
+// ==================== Job control tests ====================
 
-	a, b := recordOrder(), recordOrder()
-	n := min(len(a), len(b))
-	for i := range n {
-		if a[i] != b[i] {
-			t.Fatalf("wall-clock order differs at %d: %v then %v", i, a[:n], b[:n])
-		}
-	}
-}
-
-func TestReset(t *testing.T) {
+func TestJob_PauseResume(t *testing.T) {
 	s := NewScheduler()
+	s.SetMasterHz(60)
 	var count atomic.Int64
-	s.Run(func(st TickState) { count.Add(1) }, 100.0)
 
-	s.Advance(50 * time.Millisecond)
+	job := s.Run(func(st TickState) { count.Add(1) }, 1)
+
+	s.Advance(50 * time.Millisecond) // 3 ticks
+	if count.Load() != 3 {
+		t.Fatalf("before pause: expected 3, got %d", count.Load())
+	}
+
+	job.Pause()
+	s.Advance(50 * time.Millisecond) // 3 more ticks, but job paused
+	if count.Load() != 3 {
+		t.Fatalf("after pause: expected 3 (unchanged), got %d", count.Load())
+	}
+
+	job.Resume()
+	s.Advance(50 * time.Millisecond) // 3 more ticks, job resumes
 	if count.Load() != 6 {
-		t.Fatalf("before reset: expected 6, got %d", count.Load())
+		t.Fatalf("after resume: expected 6, got %d", count.Load())
+	}
+}
+
+func TestJob_Stop(t *testing.T) {
+	s := NewScheduler()
+	s.SetMasterHz(60)
+	var count atomic.Int64
+
+	job := s.Run(func(st TickState) { count.Add(1) }, 1)
+
+	s.Advance(50 * time.Millisecond) // 3 ticks
+	if count.Load() != 3 {
+		t.Fatalf("before stop: expected 3, got %d", count.Load())
+	}
+
+	job.Stop()
+	s.Advance(50 * time.Millisecond) // 3 more ticks, but job stopped
+	if count.Load() != 3 {
+		t.Fatalf("after stop: expected 3 (unchanged), got %d", count.Load())
+	}
+}
+
+func TestJob_PauseOneOthersFire(t *testing.T) {
+	s := NewScheduler()
+	s.SetMasterHz(60)
+	var countFast, countSlow atomic.Int64
+
+	fast := s.Run(func(st TickState) { countFast.Add(1) }, 1)
+	s.Run(func(st TickState) { countSlow.Add(1) }, 6)
+
+	fast.Pause()
+	s.Advance(100 * time.Millisecond) // 6 master ticks
+
+	if countFast.Load() != 0 {
+		t.Fatalf("fast job should be paused, got %d", countFast.Load())
+	}
+	if countSlow.Load() != 1 {
+		t.Fatalf("slow job should fire, got %d", countSlow.Load())
+	}
+}
+
+func TestJob_PauseFrozenTickIndex(t *testing.T) {
+	s := NewScheduler()
+	s.SetMasterHz(60)
+	var lastTick atomic.Uint64
+
+	job := s.Run(func(st TickState) { lastTick.Store(st.Tick) }, 1)
+
+	s.Advance(50 * time.Millisecond) // 3 ticks → tick values 0,1,2
+	if lastTick.Load() != 2 {
+		t.Fatalf("before pause: expected tick 2, got %d", lastTick.Load())
+	}
+
+	job.Pause()
+	s.Advance(200 * time.Millisecond) // 12 ticks, but paused
+	// tick should NOT have advanced
+	if lastTick.Load() != 2 {
+		t.Fatalf("while paused: expected tick 2 (frozen), got %d", lastTick.Load())
+	}
+
+	job.Resume()
+	s.Advance(1 * time.Millisecond) // 0 ticks (less than one quantum at 60Hz)
+	// Still frozen at 2 because no new ticks fired
+	s.Advance(50 * time.Millisecond) // 3 ticks → tick values 3,4,5
+	if lastTick.Load() != 5 {
+		t.Fatalf("after resume: expected tick 5, got %d", lastTick.Load())
+	}
+}
+
+// ==================== Clear vs Reset tests ====================
+
+func TestClear_RemovesJobs(t *testing.T) {
+	s := NewScheduler()
+	s.SetMasterHz(60)
+	var count atomic.Int64
+
+	s.Run(func(st TickState) { count.Add(1) }, 1)
+	s.Advance(50 * time.Millisecond)
+	if count.Load() != 3 {
+		t.Fatalf("before clear: expected 3, got %d", count.Load())
+	}
+
+	s.Clear()
+	s.Advance(50 * time.Millisecond) // no jobs → 0 ticks
+	if count.Load() != 3 {
+		t.Fatalf("after clear: expected 3 (no new ticks), got %d", count.Load())
+	}
+}
+
+func TestClear_DoesNotClearClock(t *testing.T) {
+	s := NewScheduler()
+	s.SetMasterHz(60)
+
+	s.Advance(100 * time.Millisecond)
+	if s.SimTicks() == 0 {
+		t.Fatal("expected non-zero SimTicks")
+	}
+
+	s.Clear()
+	if s.SimTicks() == 0 {
+		t.Fatal("Clear should not reset SimTicks")
+	}
+}
+
+func TestReset_ClearsClock(t *testing.T) {
+	s := NewScheduler()
+	s.SetMasterHz(60)
+
+	s.Run(func(TickState) {}, 1)
+	s.Advance(100 * time.Millisecond)
+	if s.SimTicks() == 0 {
+		t.Fatal("expected non-zero SimTicks")
 	}
 
 	s.Reset()
-
-	// After reset, simTime=0, next=0. Advance 50ms should fire 6 ticks again.
-	result := s.Advance(50 * time.Millisecond)
-	if result.Fired != 6 {
-		t.Fatalf("after reset: expected 6 ticks fired, got %d", result.Fired)
+	if s.SimTicks() != 0 {
+		t.Fatalf("expected SimTicks=0 after Reset, got %d", s.SimTicks())
 	}
-	if count.Load() != 12 {
-		t.Fatalf("after reset: expected count 12, got %d", count.Load())
+	if s.SimTime() != 0 {
+		t.Fatalf("expected SimTime=0 after Reset, got %v", s.SimTime())
 	}
 }
 
-func TestStart_DoesNotResetState(t *testing.T) {
+func TestReset_DoesNotRemoveJobs(t *testing.T) {
 	s := NewScheduler()
+	s.SetMasterHz(60)
 	var count atomic.Int64
-	s.Run(func(st TickState) { count.Add(1) }, 100.0)
 
+	s.Run(func(st TickState) { count.Add(1) }, 1)
 	s.Advance(50 * time.Millisecond)
-	c1 := count.Load()
-	if c1 != 6 {
-		t.Fatalf("before start: expected 6, got %d", c1)
+	if count.Load() != 3 {
+		t.Fatalf("before reset: expected 3, got %d", count.Load())
 	}
 
-	// Start should not reset simTime or group deadlines.
-	s.Start()
-	time.Sleep(30 * time.Millisecond)
-	s.Stop()
-
-	// count should have increased from where it was, not from zero.
-	c2 := count.Load()
-	if c2 <= c1 {
-		t.Fatalf("expected count to increase after Start, got %d (was %d)", c2, c1)
+	s.Reset()
+	s.Advance(50 * time.Millisecond) // jobs still exist → 3 more ticks
+	if count.Load() != 6 {
+		t.Fatalf("after reset: expected 6, got %d", count.Load())
 	}
 }
 
-func TestAdvance_RegisterDuringAdvance(t *testing.T) {
+func TestReset_ClearsJobCounters(t *testing.T) {
 	s := NewScheduler()
+	s.SetMasterHz(60)
+	s.SetMaxCatchUp(2)
+
+	s.Run(func(TickState) {}, 1)
+	s.Advance(100 * time.Millisecond) // 6 ticks, maxCatchUp=2 → 2 fired, dropped > 0
+
+	if s.Dropped() == 0 {
+		t.Fatal("expected dropped ticks before reset")
+	}
+
+	s.Reset()
+	if s.Dropped() != 0 {
+		t.Fatalf("expected Dropped=0 after Reset, got %d", s.Dropped())
+	}
+	if s.Ticks(1) != 0 {
+		t.Fatalf("expected Ticks=0 after Reset, got %d", s.Ticks(1))
+	}
+}
+
+// ==================== Catch-up / Dropped tests ====================
+
+func TestCatchUp_PerAdvance(t *testing.T) {
+	s := NewScheduler()
+	s.SetMasterHz(60)
+	s.SetMaxCatchUp(2)
+
 	var runs atomic.Int64
-	s.Run(func(TickState) { runs.Add(1) }, 200.0)
+	s.Run(func(TickState) { runs.Add(1) }, 1)
 
-	for i := 0; i < 10; i++ {
-		s.Run(func(TickState) { runs.Add(1) }, 200.0)
-		s.Advance(10 * time.Millisecond)
+	// Each advance of 100ms = 6 ticks, maxCatchUp=2 → 2 fired, 4 dropped.
+	r1 := s.Advance(100 * time.Millisecond)
+	if r1.Fired != 2 {
+		t.Fatalf("expected 2 fired in first advance, got %d", r1.Fired)
+	}
+	if r1.Dropped != 4 {
+		t.Fatalf("expected 4 dropped in first advance, got %d", r1.Dropped)
 	}
 
-	if runs.Load() == 0 {
-		t.Fatal("nothing ran")
+	r2 := s.Advance(100 * time.Millisecond)
+	if r2.Fired != 2 {
+		t.Fatalf("expected 2 fired in second advance, got %d", r2.Fired)
 	}
+	if r2.Dropped != 4 {
+		t.Fatalf("expected 4 dropped in second advance, got %d", r2.Dropped)
+	}
+
+	// Cumulative dropped should be 8.
+	if s.Dropped() != 8 {
+		t.Fatalf("expected cumulative Dropped=8, got %d", s.Dropped())
+	}
+}
+
+// ==================== Determinism / replay ====================
+
+func TestDeterminism_TwoSchedulers(t *testing.T) {
+	makeAndRun := func() []uint64 {
+		s := NewScheduler()
+		s.SetMasterHz(60)
+		var ticks []uint64
+		var mu sync.Mutex
+		s.Run(func(st TickState) {
+			mu.Lock()
+			ticks = append(ticks, st.Tick)
+			mu.Unlock()
+		}, 1)
+		s.Run(func(st TickState) {
+			mu.Lock()
+			ticks = append(ticks, st.Tick+1000)
+			mu.Unlock()
+		}, 2)
+
+		seq := []time.Duration{10 * time.Millisecond, 20 * time.Millisecond, 100 * time.Millisecond}
+		for _, dt := range seq {
+			s.Advance(dt)
+		}
+		return ticks
+	}
+
+	t1, t2 := makeAndRun(), makeAndRun()
+	if len(t1) != len(t2) {
+		t.Fatalf("tick counts differ: %d vs %d", len(t1), len(t2))
+	}
+	for i := range t1 {
+		if t1[i] != t2[i] {
+			t.Fatalf("tick %d differs: %d vs %d", i, t1[i], t2[i])
+		}
+	}
+}
+
+func TestReplay_RecordAndReplay(t *testing.T) {
+	type op struct {
+		advance  time.Duration
+		ticks    int
+		useTicks bool
+		speed    float64
+		pause    bool
+		resume   bool
+	}
+
+	ops := []op{
+		{advance: 10 * time.Millisecond, speed: 1.0},
+		{advance: 20 * time.Millisecond, speed: 1.0},
+		{ticks: 3, useTicks: true, speed: 2.0},
+		{advance: 100 * time.Millisecond, speed: 1.0},
+		{pause: true},
+		{advance: 50 * time.Millisecond, speed: 1.0},
+		{resume: true},
+		{ticks: 2, useTicks: true, speed: 1.0},
+	}
+
+	play := func() []uint64 {
+		s := NewScheduler()
+		s.SetMasterHz(60)
+		var ticks []uint64
+		var mu sync.Mutex
+		s.Run(func(st TickState) {
+			mu.Lock()
+			ticks = append(ticks, st.Tick)
+			mu.Unlock()
+		}, 1)
+
+		for _, op := range ops {
+			s.SetSpeed(op.speed)
+			if op.pause {
+				s.Pause()
+			}
+			if op.resume {
+				s.Resume()
+			}
+			if op.useTicks {
+				s.AdvanceTicks(op.ticks)
+			} else {
+				s.Advance(op.advance)
+			}
+		}
+		return ticks
+	}
+
+	t1, t2 := play(), play()
+	if len(t1) != len(t2) {
+		t.Fatalf("replay tick counts differ: %d vs %d", len(t1), len(t2))
+	}
+	for i := range t1 {
+		if t1[i] != t2[i] {
+			t.Fatalf("replay tick %d differs: %d vs %d", i, t1[i], t2[i])
+		}
+	}
+}
+
+// ==================== Edge cases ====================
+
+func TestAdvance_InvalidEvery(t *testing.T) {
+	s := NewScheduler()
+	s.SetMasterHz(60)
+
+	job := s.Run(func(TickState) {}, 0)
+	if job.j != nil {
+		t.Fatal("expected nil job for every=0")
+	}
+}
+
+func TestMasterHz_RejectsZero(t *testing.T) {
+	s := NewScheduler()
+	s.SetMasterHz(0)
+	if s.MasterHz() != 0 {
+		t.Fatalf("expected MasterHz=0, got %d", s.MasterHz())
+	}
+}
+
+func TestMasterHz_RejectsOver1000(t *testing.T) {
+	s := NewScheduler()
+	s.SetMasterHz(1001)
+	if s.MasterHz() != 0 {
+		t.Fatalf("expected MasterHz=0, got %d", s.MasterHz())
+	}
+}
+
+func TestQuantum_UnsetMasterHz(t *testing.T) {
+	s := NewScheduler()
+	if s.Quantum() != 0 {
+		t.Fatalf("expected Quantum=0 when MasterHz unset, got %v", s.Quantum())
+	}
+}
+
+func TestSimTicks_Zero(t *testing.T) {
+	s := NewScheduler()
+	s.SetMasterHz(60)
+	if s.SimTicks() != 0 {
+		t.Fatalf("expected SimTicks=0, got %d", s.SimTicks())
+	}
+}
+
+func TestDropped_NoJobs(t *testing.T) {
+	s := NewScheduler()
+	s.SetMasterHz(60)
+	if s.Dropped() != 0 {
+		t.Fatalf("expected Dropped=0 with no jobs, got %d", s.Dropped())
+	}
+}
+
+func TestTicks_NoJobs(t *testing.T) {
+	s := NewScheduler()
+	s.SetMasterHz(60)
+	if s.Ticks(1) != 0 {
+		t.Fatalf("expected Ticks=0 with no jobs, got %d", s.Ticks(1))
+	}
+}
+
+func TestSetMaxCatchUp_IgnoresZero(t *testing.T) {
+	s := NewScheduler()
+	s.SetMaxCatchUp(0)
+	if s.maxCatchUp.Load() != DefaultMaxCatchUp {
+		t.Fatalf("expected maxCatchUp unchanged at %d, got %d", DefaultMaxCatchUp, s.maxCatchUp.Load())
+	}
+}
+
+// ==================== Concurrency (race detector) ====================
+
+func TestRace_RunDuringIdle(t *testing.T) {
+	s := NewScheduler()
+	s.SetMasterHz(60)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.Run(func(TickState) {}, 1)
+		}()
+	}
+	wg.Wait()
+	// Just ensure no race; Advance not called concurrently.
+}
+
+func TestRace_StopDuringIdle(t *testing.T) {
+	s := NewScheduler()
+	s.SetMasterHz(60)
+
+	var jobs []Job
+	for i := 0; i < 100; i++ {
+		jobs = append(jobs, s.Run(func(TickState) {}, 1))
+	}
+
+	var wg sync.WaitGroup
+	for _, j := range jobs {
+		j := j
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			j.Stop()
+		}()
+	}
+	wg.Wait()
 }

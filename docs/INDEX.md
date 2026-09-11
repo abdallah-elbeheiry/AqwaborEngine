@@ -24,8 +24,8 @@ Everything else is behind those.
 - [The entity component system](ecs.md) — how a component is reached, what a system iterates, and
   what it means for an entity to be awake or waiting. Read this first; it is the shape the rest
   assumes.
-- [Scheduling](scheduling.md) — fixed-rate ticks, bounded catch-up, and how systems declare what they
-  touch so the schedule can run them at the same time.
+- [Scheduling](scheduling.md) — deterministic master clock, dual advance API, per-job control, and how
+  systems declare what they touch so the schedule can run them at the same time.
 - [The render layer](render.md) — the frame's two phases, the Scene that draws a
   world, chunked instance buffers, GPU culling, strokes and the compact cell
   format. `examples/scenedemo` is the game side of it in one file.

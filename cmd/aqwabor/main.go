@@ -45,9 +45,8 @@ func runUIDemo() {
 	defer app.Close()
 
 	s := schedulers.NewScheduler()
-	s.Run(func(st schedulers.TickState) {}, 2.0)
-	s.Start()
-	defer s.Stop()
+	s.SetMasterHz(60)
+	s.Run(func(st schedulers.TickState) {}, 30) // every 30 master ticks = 2 Hz at 60
 
 	var fox *ui.ImageAsset
 	if foxAsset, err := app.Images().Load("examples/fox.png"); err != nil {

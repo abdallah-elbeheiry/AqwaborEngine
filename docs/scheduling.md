@@ -9,129 +9,236 @@ A `Schedule` decides, within one tick, what may run at the same time as what.
 They are separable: a game can drive ticks itself and still use a `Schedule`, or run a `Scheduler`
 with plain functions and no access declarations at all.
 
-## Fixed-rate ticks
+## Deterministic clock
 
-The scheduler has two layers. The **deterministic core** (`Advance`) decides which ticks fire using
-only simulation time — no wall clock, no timers, no goroutines. The **optional pacer** (`Start` /
-`Stop`) translates wall-clock elapsed time into simulation-time deltas and feeds them to the core.
-
-A game that only calls `Run` + `Start` keeps the same experience it always had. A test that calls
-`Advance` directly gets a fully deterministic, replayable, zero-sleeping simulation.
+The scheduler owns a **deterministic simulation clock**. Time moves only when the caller advances it.
+No wall clock, no timers, no goroutines participate in tick decisions. Given the same sequence of
+advance calls and the same speed / pause settings, the sequence of tick values and the order of
+function calls are bit-for-bit identical across runs, machines, and load conditions.
 
 ### Single-writer contract
 
-`Advance` must not be called concurrently. Exactly one caller drives it at a time — the real-time
-pacer, a test, or a replay harness. Under that contract `Advance` reads all shared state through
-atomics (speed, paused, simTime, maxCatchUp, the sorted group order) and never acquires the mutex.
-This makes `Advance` lock-free on the hot path.
+`Advance` and `AdvanceTicks` must not be called concurrently. Exactly one caller drives the clock
+at a time — a real-time loop, a test, or a replay harness. Under that contract the scheduler reads
+all shared state through atomics and never acquires the mutex on the hot path.
 
-`Run` may be called concurrently with `Advance`. The function list is published via atomic
-copy-on-write and the sorted order is published via an atomic pointer, so `Advance` always sees a
-consistent snapshot without locking.
+`Run` (registering jobs) may be called concurrently with `Advance`. The function list is published
+via atomic copy-on-write and the sorted order is published via an atomic pointer, so `Advance`
+always sees a consistent snapshot without locking.
 
-### Direct control with Advance
+## Master Hz and the quantum
 
-`Advance` is the pure entry point. Given a simulation-time delta, it fires every tick that is due,
-returns what happened, and never touches the wall clock.
+The scheduler runs on a **master quantum** derived from a configurable tick rate.
 
 ```go
-s := schedulers.NewScheduler()
-s.Run(simulate, 120)      // 120 Hz
-s.Run(autosave, 0.1)      // once every ten seconds
-
-result := s.Advance(time.Second / 60)   // advance 1/60th of a second of simulation time
-result.Fired                              // total ticks fired across all rates
-result.Dropped                            // ticks discarded by catch-up
+s.SetMasterHz(60)         // set the master tick rate (required before AdvanceTicks)
+s.SetMasterHz(120)        // can be changed between advances
+s.MasterHz() uint         // current master Hz
+s.Quantum() time.Duration // 1/masterHz * speed, or 0 if speed ≤ 0 or master Hz unset
 ```
 
-Given the same sequence of `Advance` calls and the same speed / pause settings, the sequence of
-`Tick` values and the order of function calls are bit-for-bit identical across runs, machines,
-and load conditions.
+- Master Hz must be ≥ 1 and ≤ 1000. Setting 0 is rejected.
+- If `SetMasterHz` has never been called, `AdvanceTicks` panics (no default — the caller must
+  commit to an explicit rate).
+- `Quantum()` reflects the current speed setting: it is `time.Second / masterHz * speed`.
+- Integer master tick count (`SimTicks`) is the source of truth; durations are derived when needed.
 
-### Real-time pacer
+## Advancing time
 
-`Start` launches a background goroutine that measures wall-clock elapsed time, scales it by the
-current speed, and calls `Advance` with the resulting delta. The goroutine sleeps until the next
-tick is due, then wakes and repeats.
+There are two ways to advance the clock, each with clear semantics:
 
 ```go
-s := schedulers.NewScheduler()
-s.Run(simulate, 120)
-s.Run(autosave, 0.1)
-
-s.Start()
-s.SetSpeed(3)             // three times as fast; scales every rate
-s.Pause()
-s.Resume()
-s.Stop()
+result := s.Advance(simDT time.Duration) AdvanceResult     // explicit, unscaled
+result := s.AdvanceTicks(n int) AdvanceResult               // n * quantum (scaled by speed)
 ```
 
-`Advance` works without `Start` and `Start` is never required. The pacer is a convenience for
-real-time games; tests and replay tools never need it.
+### Advance(simDT) — explicit simulation time
 
-`Advance(simDT)` treats `simDT` as already-scaled simulation time. Speed only affects the pacer:
-it scales wall-clock elapsed time into `simDT` before calling `Advance`. Calling `Advance` directly
-with a `simDT` of 10ms always advances 10ms of simulation time regardless of the speed setting.
-When speed is 0 or the scheduler is paused, `Advance` is a no-op.
+`Advance` advances the clock by exactly `simDT` of simulation time. Speed is **ignored**.
+A `simDT` of 10ms always advances 10ms regardless of the speed setting.
 
-Each rate keeps its own deadline and its own tick count. Functions registered at the same rate run
-together, in registration order; rates run in ascending order, so two runs of the same registrations
-tick in the same order.
+```go
+s.SetMasterHz(60)
+s.SetSpeed(3)
+result := s.Advance(time.Second / 60) // advances exactly 1/60th of a second, not 3/60th
+```
 
-Registering while the scheduler runs is allowed. The running goroutine picks the change up at its
-next wake rather than reading a slice being appended to.
+When the scheduler is paused, `Advance` is a no-op and returns an empty result.
 
-`Start` does not reset accumulated simulation time or group state. To clear state, call `Reset()`
-explicitly. This lets `Start`/`Stop` cycles resume cleanly from where the scheduler left off.
+### AdvanceTicks(n) — quantum-based advance
 
-### What a tick is handed
+`AdvanceTicks` advances the clock by `n` master quanta, scaled by speed.
+
+```go
+s.SetMasterHz(60)
+s.SetSpeed(2)
+result := s.AdvanceTicks(1) // advances 2/60th of a second (1 quantum × speed 2)
+result := s.AdvanceTicks(3) // advances 6/60th of a second (3 quanta × speed 2)
+```
+
+`AdvanceTicks(0)` and negative values are no-ops. When speed ≤ 0, `AdvanceTicks` advances nothing.
+When paused, `AdvanceTicks` is a no-op.
+
+### AdvanceResult
+
+```go
+type AdvanceResult struct {
+    Fired   int    // total ticks fired across all rate groups
+    Dropped uint64 // ticks discarded by catch-up in this call
+}
+```
+
+### Clock inspection
+
+```go
+s.SimTime() time.Duration   // current simulation time
+s.SimTicks() uint64         // number of master quanta advanced
+```
+
+## Jobs
+
+Jobs are registered via `Run`, which returns a `Job` handle for per-job control.
+
+```go
+job := s.Run(fn func(TickState), every uint)  // every ≥ 1 master ticks
+```
+
+- `every` is the number of master ticks between invocations. `every=1` means the job fires every
+  master tick. `every=60` at 60Hz means once per second.
+- Registration order is preserved within the same period. Jobs fire in ascending `every` order,
+  then registration order.
+
+### Job handle
+
+```go
+job.Pause()   // freeze this job; skipped in the batch, no tick index advance
+job.Resume()  // unfreeze; next advance picks up where it left off
+job.Stop()    // unregister this job only; safe concurrent with Advance
+```
+
+Paused jobs are frozen: they do not advance their tick index while paused. Stopped jobs are
+removed from the published order via copy-on-write; the `Advance` call that is in flight sees
+the snapshot it captured and finishes normally.
+
+### Per-job tick identity
+
+Each job has its own tick counter (0-based). `TickState` passed to the function carries:
 
 ```go
 type TickState struct {
-    Tick uint64   // this rate's own tick count, from zero
-    Hz   float64  // the rate it was registered at
+    Tick uint64   // this job's own tick count, from zero
+    Hz   float64  // effective rate: masterHz / every
 }
-
-func (t TickState) Delta() float64   // 1/hz, fixed regardless of how far behind the loop is
 ```
 
-The tick count is the primary field. A simulation counting in integers should not be obliged to carry
-a float, and a rate is `rate * ticks / hz` rather than an accumulated delta.
+`TickState.Delta()` returns `every / masterHz` in seconds — the fixed timestep for this job.
 
-All simulation time is `time.Duration` (integer nanoseconds). No float accumulators are used for
-tick deadlines.
+### Catch-up
 
-### Falling behind
-
-Catch-up is bounded. A rate runs at most `MaxCatchUp` ticks per `Advance` call, eight by default,
-and discards what it still owes past that.
-
-Without the bound, a tick that overran its budget left a growing gap between the current simulation
-time and the next deadline, so the next wake ran more ticks, which overran further: the
-fixed-timestep spiral. With it, the simulation runs slower than wall time, which is the correct
-failure — it degrades to a lower effective rate rather than falling further behind on every wake.
-Extreme time scaling is the condition that finds this, and the loop is meant to survive it.
+A job runs at most `MaxCatchUp` ticks per `Advance` call (default 8). Excess overdue ticks are
+counted as dropped and the deadline is jumped forward. Without the bound, a tick that overruns
+leaves a growing accumulator — the standard fixed-timestep spiral.
 
 ```go
 s.SetMaxCatchUp(4)
-s.Dropped()      // ticks discarded; a rising count is the simulation not keeping up
-s.Ticks(120)     // how many ticks a rate has run
-s.Reset()        // zeroes simTime, all deadlines, tick counts, and dropped counts
+s.Dropped()          // total ticks discarded across all jobs
 ```
 
-`Dropped` is the number to watch when time scaling is turned up. `Reset` is the
-explicit way to clear accumulated state; `Start` no longer does this implicitly.
+## Speed
 
-### Replay and testing
+```go
+s.SetSpeed(speed float64)   // < 0 → clamped to 0
+s.Speed() float64
+```
 
-Because `Advance` is pure, tests can drive the scheduler without goroutines, sleeps, or wall clocks:
+- Default speed is 1.
+- Speed affects **`AdvanceTicks` and `Quantum` only**. `Advance(simDT)` ignores speed entirely.
+- When speed ≤ 0, `AdvanceTicks` advances nothing and `Advance` is a no-op (if paused).
+- Speed does not change the master Hz — it scales the effective quantum duration.
+
+```go
+// Fast-forward: advance 3× as many quanta per frame
+s.SetSpeed(3)
+s.AdvanceTicks(1) // equivalent to 3 master ticks at speed 1
+
+// Or equivalently:
+s.AdvanceTicks(3) // 3 ticks at speed 1, same result
+```
+
+## Pause and resume
+
+```go
+s.Pause()    // global pause; Advance and AdvanceTicks become no-ops
+s.Resume()   // resume; clock advances again
+```
+
+`Pause` / `Resume` are global toggles. Per-job pause / resume is via the `Job` handle.
+
+## Clear and Reset
+
+```go
+s.Clear()    // removes all jobs; does not clear the clock
+s.Reset()    // clears the clock + counters; does not remove jobs
+```
+
+- `Clear`: all jobs gone; `SimTime` / `SimTicks` / per-job counters unchanged.
+- `Reset`: `SimTime` / `SimTicks` / per-job tick + dropped + next deadline = 0; jobs remain.
+
+## Falling behind
+
+Catch-up is bounded. A job runs at most `MaxCatchUp` ticks per `Advance` call, eight by default,
+and discards what it still owes past that.
+
+With the bound, the simulation runs slower than wall time when it cannot keep up, which is the
+correct failure — it degrades to a lower effective rate rather than falling further behind on every
+wake. `Dropped` is the count to watch when time scaling is turned up.
+
+## Replay and testing
+
+Because `Advance` and `AdvanceTicks` are pure, tests can drive the scheduler without goroutines,
+sleeps, or wall clocks:
 
 1. Register functions.
-2. Call `Advance` with precise `simDT` values.
+2. Call `Advance` or `AdvanceTicks` with precise values.
 3. Assert exact tick counts, exact order, and exact `Tick` values.
 
-A recorded sequence of `Advance` / speed / pause commands can be replayed to produce the exact same
+A recorded sequence of advance / speed / pause commands can be replayed to produce the exact same
 tick sequence, which is the foundation for deterministic replays.
+
+```go
+// Test loop — no wall clock
+s := schedulers.NewScheduler()
+s.SetMasterHz(60)
+s.Run(simulate, 1)   // every 1 master tick
+
+for i := 0; i < 600; i++ {
+    s.AdvanceTicks(1) // advance 1 quantum per frame
+}
+// Assert exact state
+```
+
+## Real-time loop (caller-owned sleep)
+
+The scheduler does not own a background thread. A real-time loop is a caller-owned sleep or
+vsync callback that calls `AdvanceTicks` each frame:
+
+```go
+s.SetMasterHz(60)
+s.SetSpeed(1)
+
+for running {
+    frameStart := time.Now()
+
+    // ... input, physics, render ...
+
+    s.AdvanceTicks(1)  // advance one master tick
+
+    elapsed := time.Since(frameStart)
+    if elapsed < frameBudget {
+        time.Sleep(frameBudget - elapsed)
+    }
+}
+```
 
 ## What may run at the same time
 
@@ -146,7 +253,7 @@ sched.Add("move",    schedulers.Reads(rVel).Writes(rPos),   moveSystem)
 sched.Add("thermal", schedulers.Writes(rHeat),              thermalSystem)
 sched.Add("extract", schedulers.Reads(rPos),                extractSystem)
 
-s.Run(sched.Run, 120)
+s.Run(sched.Run, 1)   // run the schedule every master tick
 ```
 
 Two systems may run at the same time when neither writes something the other touches; a write
@@ -198,15 +305,6 @@ sched.SetParallelFloor(20 * time.Microsecond)
 sched.SetParallel(false)   // everything serial, for comparing results
 ```
 
-Measured on an M4 Max, sixteen logical cores, eight systems in one stage: compute-bound work went
-from 285 to 87.5 microseconds, and eight systems each walking their own 320 KB array from 80.3 to
-36.9.
-
-Whether memory traffic costs the gain depends on what is shared. Splitting one array across workers
-returned nothing in a separate measurement, while systems over separate arrays scaled, because those
-fit in separate caches. So the floor is a floor rather than a rule about which passes are worth
-splitting.
-
 ## Parallel work inside one system
 
 ```go
@@ -216,14 +314,6 @@ f := schedulers.Go(func() int { return heavy() })
 val := f.Get()
 schedulers.AwaitAll(f1, f2, f3)
 ```
-
-The same floor applies: `ParallelFor` costs 3305 nanoseconds to do nothing, and a pass under roughly
-50 microseconds loses by being split.
-
-The natural partition for a world of separate grids is one worker per grid, because power, signal,
-logistics and atmosphere all resolve within one grid and share nothing across them. For a diffusion
-pass, reading one buffer and writing a second makes every cell independent and removes the question
-of update order rather than answering it.
 
 ## A panicking system
 
