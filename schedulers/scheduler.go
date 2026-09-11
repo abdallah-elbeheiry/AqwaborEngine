@@ -1,6 +1,7 @@
 package schedulers
 
 import (
+	"math"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -47,7 +48,7 @@ const DefaultMaxCatchUp = 8
 type AdvanceResult struct {
 	// Fired is the total number of ticks fired across all rate groups.
 	Fired int
-	// Dropped is the total number of ticks discarded across all rate groups.
+	// Dropped is the number of ticks discarded by catch-up in this Advance call.
 	Dropped uint64
 }
 
@@ -60,16 +61,14 @@ type rateGroup struct {
 	// After firing n ticks: next = n * interval.
 	next time.Duration
 
-	// fns is replaced rather than appended to, so a snapshot taken under the
-	// lock keeps a slice nothing will write into afterwards.
-	fns []func(TickState)
+	// fns is an atomically published copy-on-write slice. Run stores a new
+	// slice pointer via CAS; Advance reads it atomically. This means Advance
+	// never needs the mutex to iterate the function list.
+	fns atomic.Pointer[[]func(TickState)]
 
-	// tick and dropped are written by the run goroutine and read by callers, so
-	// they are atomic rather than guarded: reading them must not have to wait
-	// behind a tick that is in progress.
-	tick atomic.Uint64
-	// dropped counts ticks discarded because the group hit its catch-up bound,
-	// which is the number that says the simulation is not keeping up.
+	// tick and dropped are written by Advance (single writer) and read by
+	// callers via atomic loads, so no mutex is needed.
+	tick    atomic.Uint64
 	dropped atomic.Uint64
 }
 
@@ -88,35 +87,47 @@ type groupRun struct {
 // The optional pacer goroutine started by Start only translates wall time into
 // simulation-time deltas and feeds them to Advance. If the pacer is not
 // started, the scheduler is still fully usable via Advance alone.
+//
+// # Single-writer contract
+//
+// Advance must not be called concurrently — it is intended to be driven by
+// exactly one caller at a time (the real-time pacer, a test, or a replay
+// harness). Under that contract the scheduler is deterministic, replayable,
+// and race-free without any locking inside Advance.
+//
+// Advance reads all state through atomics (speed, paused, simTime, maxCatchUp,
+// order) and never acquires the mutex. Run may be called concurrently with
+// Advance: the function list is published via atomic copy-on-write, and the
+// sorted group order is published via an atomic pointer.
 type Scheduler struct {
-	mu      sync.Mutex
-	groups  map[float64]*rateGroup
-	order   []groupRun // groups sorted by rate, so the run order is stable
-	dirty   bool
-	running bool
-	paused  bool
-	speed   float64
+	mu     sync.Mutex
+	groups map[float64]*rateGroup
 
-	maxCatchUp int
+	running    atomic.Bool
+	paused     atomic.Bool
+	speed      atomic.Uint64 // float64 bits
+	maxCatchUp atomic.Int32
+	simTime    atomic.Int64 // nanoseconds
+	order      atomic.Pointer[[]groupRun]
 
 	stopCh         chan struct{}
 	doneCh         chan struct{}
 	stateChangedCh chan struct{} // buffered signal for pause/resume/speed/register
 	timer          *time.Timer
 
-	// Core state: simTime is the total simulation time advanced.
 	// lastWall is the wall time of the last pacer advance.
-	simTime  time.Duration
+	// Only accessed by the pacer goroutine after Start returns.
 	lastWall time.Time
 }
 
 func NewScheduler() *Scheduler {
 	log.Debug("scheduler created")
-	return &Scheduler{
-		groups:     make(map[float64]*rateGroup),
-		speed:      1.0,
-		maxCatchUp: DefaultMaxCatchUp,
+	s := &Scheduler{
+		groups: make(map[float64]*rateGroup),
 	}
+	s.speed.Store(math.Float64bits(1.0))
+	s.maxCatchUp.Store(DefaultMaxCatchUp)
+	return s
 }
 
 // SetMaxCatchUp bounds the ticks one wake may run for a single rate. A value
@@ -126,15 +137,16 @@ func (s *Scheduler) SetMaxCatchUp(n int) {
 		log.Warn("SetMaxCatchUp ignored: a bound below one would stop the simulation", "n", n)
 		return
 	}
-	s.mu.Lock()
-	s.maxCatchUp = n
-	s.mu.Unlock()
+	s.maxCatchUp.Store(int32(n))
 }
 
 // Run registers fn to be called hz times a second.
 //
 // Registering after Start is allowed: the running goroutine picks up the change
 // at its next wake rather than reading the slice while it is being appended to.
+//
+// The function list is published atomically via copy-on-write, so Advance
+// always sees a consistent snapshot even if Run is called concurrently.
 func (s *Scheduler) Run(fn func(TickState), hz float64) {
 	if hz <= 0 {
 		log.Warn("Run ignored: non-positive hz", "hz", hz)
@@ -147,36 +159,46 @@ func (s *Scheduler) Run(fn func(TickState), hz float64) {
 	if !ok {
 		interval := time.Duration(float64(time.Second) / hz)
 		g = &rateGroup{hz: hz, interval: interval, next: 0}
+		empty := []func(TickState){}
+		g.fns.Store(&empty)
 		s.groups[hz] = g
 	}
-	// Copy before appending. The run goroutine may be holding the old slice, and
-	// appending in place would write into it.
-	fns := make([]func(TickState), len(g.fns), len(g.fns)+1)
-	copy(fns, g.fns)
-	g.fns = append(fns, fn)
-	s.dirty = true
-	log.Debug("registered tick function", "hz", hz, "interval", g.interval, "total_fns", len(g.fns))
+
+	// Copy-on-write via make+copy. The old slice remains valid for any
+	// Advance that captured it; the new slice is published atomically.
+	// We never append to the old slice, which could mutate its backing array.
+	for {
+		old := g.fns.Load()
+		newSlice := make([]func(TickState), len(*old)+1)
+		copy(newSlice, *old)
+		newSlice[len(*old)] = fn
+		if g.fns.CompareAndSwap(old, &newSlice) {
+			break
+		}
+	}
+
+	s.rebuildOrder()
+	log.Debug("registered tick function", "hz", hz, "interval", g.interval, "total_fns", len(*g.fns.Load()))
 	s.signal()
 }
 
-// snapshot rebuilds the ordered group list when registrations have changed.
+// rebuildOrder rebuilds the sorted group list and publishes it atomically.
 // Groups run in ascending rate order, so two runs of the same registrations
 // tick their functions in the same order; a Go map would vary it per wake.
-func (s *Scheduler) snapshot() []groupRun {
-	if !s.dirty && s.order != nil {
-		return s.order
-	}
-	s.order = s.order[:0]
+// Must be called under s.mu.
+func (s *Scheduler) rebuildOrder() {
+	order := make([]groupRun, 0, len(s.groups))
 	for _, g := range s.groups {
-		s.order = append(s.order, groupRun{g: g, fns: g.fns})
+		fns := g.fns.Load()
+		order = append(order, groupRun{g: g, fns: *fns})
 	}
-	sort.Slice(s.order, func(i, j int) bool { return s.order[i].g.hz < s.order[j].g.hz })
-	s.dirty = false
-	return s.order
+	sort.Slice(order, func(i, j int) bool { return order[i].g.hz < order[j].g.hz })
+	s.order.Store(&order)
 }
 
 // signal sends a non-blocking notification to the run loop so it recomputes
-// the earliest deadline and arms the timer.
+// the earliest deadline and arms the timer. Must be called under s.mu
+// (which protects stateChangedCh creation).
 func (s *Scheduler) signal() {
 	select {
 	case s.stateChangedCh <- struct{}{}:
@@ -188,25 +210,34 @@ func (s *Scheduler) signal() {
 // It returns how many ticks were fired and how many were dropped across all
 // rate groups.
 //
-// Advance is pure: given the same sequence of simDT/speed/pause values it
-// always produces the same Tick sequence and function call order. It makes no
-// calls to time.Now, uses no timers, and spawns no goroutines.
+// Advance is pure: given the same sequence of simDT values it always produces
+// the same Tick sequence and function call order. It makes no calls to
+// time.Now, uses no timers, and spawns no goroutines.
 //
 // When speed is 0 or the scheduler is paused, Advance is a no-op and returns
 // an empty result.
+//
+// Advance must not be called concurrently. It is the single writer to
+// simTime and to the per-group tick/deadline state. It reads all shared
+// state through atomics and never acquires the mutex.
 func (s *Scheduler) Advance(simDT time.Duration) AdvanceResult {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if simDT <= 0 || s.speed == 0 || s.paused {
+	if simDT <= 0 {
+		return AdvanceResult{}
+	}
+	speed := math.Float64frombits(s.speed.Load())
+	if speed == 0 || s.paused.Load() {
 		return AdvanceResult{}
 	}
 
-	s.simTime += simDT
+	newSimTime := time.Duration(s.simTime.Add(int64(simDT)))
 	result := AdvanceResult{}
 
-	for _, gr := range s.snapshot() {
-		fired, dropped := s.advanceGroup(gr, s.simTime)
+	order := s.order.Load()
+	if order == nil {
+		return result
+	}
+	for _, gr := range *order {
+		fired, dropped := s.advanceGroup(gr, newSimTime)
 		result.Fired += fired
 		result.Dropped += dropped
 	}
@@ -219,12 +250,10 @@ func (s *Scheduler) Advance(simDT time.Duration) AdvanceResult {
 // dropped and the deadline is jumped forward.
 func (s *Scheduler) advanceGroup(gr groupRun, simTime time.Duration) (fired int, dropped uint64) {
 	g := gr.g
-	if s.speed <= 0 {
-		return 0, 0
-	}
+	maxCatchUp := int(s.maxCatchUp.Load())
 
 	ran := 0
-	for g.next <= simTime && ran < s.maxCatchUp {
+	for g.next <= simTime && ran < maxCatchUp {
 		state := TickState{Tick: g.tick.Load(), Hz: g.hz}
 		for _, fn := range gr.fns {
 			s.call(fn, state, g)
@@ -238,21 +267,26 @@ func (s *Scheduler) advanceGroup(gr groupRun, simTime time.Duration) (fired int,
 		overdue := simTime - g.next
 		owed := overdue / g.interval
 		if owed > 0 {
-			dropped = g.dropped.Add(uint64(owed))
+			dropped = uint64(owed)
+			g.dropped.Add(dropped)
 			g.next = g.next + time.Duration(owed)*g.interval
 			log.Debug("rate fell behind and dropped ticks",
-				"hz", g.hz, "dropped", owed, "total_dropped", dropped)
+				"hz", g.hz, "dropped", owed, "total_dropped", g.dropped.Load())
 		}
 	}
 
 	return ran, dropped
 }
 
-// earliestDeadlineLocked returns the earliest simulation-time deadline across
-// all groups, or 0 if none. Caller must hold s.mu.
-func (s *Scheduler) earliestDeadlineLocked() time.Duration {
+// earliestDeadline returns the earliest simulation-time deadline across
+// all groups, or 0 if none. Called by the pacer after Advance returns.
+func (s *Scheduler) earliestDeadline() time.Duration {
+	order := s.order.Load()
+	if order == nil {
+		return 0
+	}
 	var earliest time.Duration
-	for _, gr := range s.snapshot() {
+	for _, gr := range *order {
 		if earliest == 0 || gr.g.next < earliest {
 			earliest = gr.g.next
 		}
@@ -260,20 +294,28 @@ func (s *Scheduler) earliestDeadlineLocked() time.Duration {
 	return earliest
 }
 
+// Reset zeroes simTime and all group deadlines and counters.
+// Use this instead of Start to clear accumulated state.
+func (s *Scheduler) Reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.simTime.Store(0)
+	for _, g := range s.groups {
+		g.next = 0
+		g.tick.Store(0)
+		g.dropped.Store(0)
+	}
+}
+
 func (s *Scheduler) Start() {
 	s.mu.Lock()
-	if s.running {
+	if s.running.Load() {
 		s.mu.Unlock()
 		return
 	}
-	s.running = true
-	s.paused = false
-	s.simTime = 0
+	s.running.Store(true)
+	s.paused.Store(false)
 	s.lastWall = time.Now()
-	// Reset all group deadlines to simulation time zero so Start is idempotent.
-	for _, gr := range s.groups {
-		gr.next = 0
-	}
 	s.stopCh = make(chan struct{})
 	s.doneCh = make(chan struct{})
 	s.stateChangedCh = make(chan struct{}, 16)
@@ -281,10 +323,10 @@ func (s *Scheduler) Start() {
 	// Drain the immediate fire from the zero-duration timer.
 	<-s.timer.C
 	rates := make([]float64, 0, len(s.groups))
-	for _, gr := range s.snapshot() {
-		rates = append(rates, gr.g.hz)
+	for hz := range s.groups {
+		rates = append(rates, hz)
 	}
-	speed := s.speed
+	speed := math.Float64frombits(s.speed.Load())
 	s.mu.Unlock()
 
 	log.Debug("scheduler started", "rates", rates, "speed", speed)
@@ -293,11 +335,11 @@ func (s *Scheduler) Start() {
 
 func (s *Scheduler) Stop() {
 	s.mu.Lock()
-	if !s.running {
+	if !s.running.Load() {
 		s.mu.Unlock()
 		return
 	}
-	s.running = false
+	s.running.Store(false)
 	stopCh := s.stopCh
 	doneCh := s.doneCh
 	timer := s.timer
@@ -316,14 +358,14 @@ func (s *Scheduler) Stop() {
 
 func (s *Scheduler) Pause() {
 	s.mu.Lock()
-	s.paused = true
+	s.paused.Store(true)
 	s.mu.Unlock()
 	s.signal()
 }
 
 func (s *Scheduler) Resume() {
 	s.mu.Lock()
-	s.paused = false
+	s.paused.Store(false)
 	s.mu.Unlock()
 	s.signal()
 }
@@ -333,38 +375,41 @@ func (s *Scheduler) SetSpeed(speed float64) {
 		speed = 0
 	}
 	s.mu.Lock()
-	s.speed = speed
+	s.speed.Store(math.Float64bits(speed))
 	s.mu.Unlock()
 	s.signal()
 	log.Debug("scheduler speed changed", "speed", speed)
 }
 
 func (s *Scheduler) Speed() float64 {
-	s.mu.Lock()
-	speed := s.speed
-	s.mu.Unlock()
-	return speed
+	return math.Float64frombits(s.speed.Load())
 }
 
 // Dropped is how many ticks have been discarded because a rate hit its
 // catch-up bound. A rising count is the simulation failing to keep up, and is
 // the number to watch when time scaling is turned up.
 func (s *Scheduler) Dropped() uint64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	order := s.order.Load()
+	if order == nil {
+		return 0
+	}
 	var n uint64
-	for _, g := range s.groups {
-		n += g.dropped.Load()
+	for _, gr := range *order {
+		n += gr.g.dropped.Load()
 	}
 	return n
 }
 
 // Ticks is how many ticks a rate has run.
 func (s *Scheduler) Ticks(hz float64) uint64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if g, ok := s.groups[hz]; ok {
-		return g.tick.Load()
+	order := s.order.Load()
+	if order == nil {
+		return 0
+	}
+	for _, gr := range *order {
+		if gr.g.hz == hz {
+			return gr.g.tick.Load()
+		}
 	}
 	return 0
 }
@@ -382,18 +427,16 @@ func (s *Scheduler) run() {
 	var wallNow time.Time
 
 	for {
-		s.mu.Lock()
-		running := s.running
-		paused := s.paused
-		speed := s.speed
-		groups := s.snapshot()
+		running := s.running.Load()
+		paused := s.paused.Load()
+		speed := math.Float64frombits(s.speed.Load())
+		order := s.order.Load()
+
 		if !running {
-			s.mu.Unlock()
 			return
 		}
-		s.mu.Unlock()
 
-		if paused || speed == 0 || len(groups) == 0 {
+		if paused || speed == 0 || order == nil || len(*order) == 0 {
 			select {
 			case <-s.stopCh:
 				return
@@ -412,11 +455,9 @@ func (s *Scheduler) run() {
 		}
 
 		// Find the earliest simulation deadline and sleep until then.
-		s.mu.Lock()
-		earliest := s.earliestDeadlineLocked()
-		simTime := s.simTime
-		speed = s.speed
-		s.mu.Unlock()
+		earliest := s.earliestDeadline()
+		simTime := time.Duration(s.simTime.Load())
+		speed = math.Float64frombits(s.speed.Load())
 
 		if earliest > 0 && earliest <= simTime {
 			// Already due; don't sleep.

@@ -18,6 +18,17 @@ only simulation time — no wall clock, no timers, no goroutines. The **optional
 A game that only calls `Run` + `Start` keeps the same experience it always had. A test that calls
 `Advance` directly gets a fully deterministic, replayable, zero-sleeping simulation.
 
+### Single-writer contract
+
+`Advance` must not be called concurrently. Exactly one caller drives it at a time — the real-time
+pacer, a test, or a replay harness. Under that contract `Advance` reads all shared state through
+atomics (speed, paused, simTime, maxCatchUp, the sorted group order) and never acquires the mutex.
+This makes `Advance` lock-free on the hot path.
+
+`Run` may be called concurrently with `Advance`. The function list is published via atomic
+copy-on-write and the sorted order is published via an atomic pointer, so `Advance` always sees a
+consistent snapshot without locking.
+
 ### Direct control with Advance
 
 `Advance` is the pure entry point. Given a simulation-time delta, it fires every tick that is due,
@@ -58,12 +69,20 @@ s.Stop()
 `Advance` works without `Start` and `Start` is never required. The pacer is a convenience for
 real-time games; tests and replay tools never need it.
 
+`Advance(simDT)` treats `simDT` as already-scaled simulation time. Speed only affects the pacer:
+it scales wall-clock elapsed time into `simDT` before calling `Advance`. Calling `Advance` directly
+with a `simDT` of 10ms always advances 10ms of simulation time regardless of the speed setting.
+When speed is 0 or the scheduler is paused, `Advance` is a no-op.
+
 Each rate keeps its own deadline and its own tick count. Functions registered at the same rate run
 together, in registration order; rates run in ascending order, so two runs of the same registrations
 tick in the same order.
 
 Registering while the scheduler runs is allowed. The running goroutine picks the change up at its
 next wake rather than reading a slice being appended to.
+
+`Start` does not reset accumulated simulation time or group state. To clear state, call `Reset()`
+explicitly. This lets `Start`/`Stop` cycles resume cleanly from where the scheduler left off.
 
 ### What a tick is handed
 
@@ -97,9 +116,11 @@ Extreme time scaling is the condition that finds this, and the loop is meant to 
 s.SetMaxCatchUp(4)
 s.Dropped()      // ticks discarded; a rising count is the simulation not keeping up
 s.Ticks(120)     // how many ticks a rate has run
+s.Reset()        // zeroes simTime, all deadlines, tick counts, and dropped counts
 ```
 
-`Dropped` is the number to watch when time scaling is turned up.
+`Dropped` is the number to watch when time scaling is turned up. `Reset` is the
+explicit way to clear accumulated state; `Start` no longer does this implicitly.
 
 ### Replay and testing
 

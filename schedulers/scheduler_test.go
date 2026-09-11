@@ -1066,6 +1066,51 @@ func TestScheduler_StableRateOrderVsWallClock(t *testing.T) {
 	}
 }
 
+func TestReset(t *testing.T) {
+	s := NewScheduler()
+	var count atomic.Int64
+	s.Run(func(st TickState) { count.Add(1) }, 100.0)
+
+	s.Advance(50 * time.Millisecond)
+	if count.Load() != 6 {
+		t.Fatalf("before reset: expected 6, got %d", count.Load())
+	}
+
+	s.Reset()
+
+	// After reset, simTime=0, next=0. Advance 50ms should fire 6 ticks again.
+	result := s.Advance(50 * time.Millisecond)
+	if result.Fired != 6 {
+		t.Fatalf("after reset: expected 6 ticks fired, got %d", result.Fired)
+	}
+	if count.Load() != 12 {
+		t.Fatalf("after reset: expected count 12, got %d", count.Load())
+	}
+}
+
+func TestStart_DoesNotResetState(t *testing.T) {
+	s := NewScheduler()
+	var count atomic.Int64
+	s.Run(func(st TickState) { count.Add(1) }, 100.0)
+
+	s.Advance(50 * time.Millisecond)
+	c1 := count.Load()
+	if c1 != 6 {
+		t.Fatalf("before start: expected 6, got %d", c1)
+	}
+
+	// Start should not reset simTime or group deadlines.
+	s.Start()
+	time.Sleep(30 * time.Millisecond)
+	s.Stop()
+
+	// count should have increased from where it was, not from zero.
+	c2 := count.Load()
+	if c2 <= c1 {
+		t.Fatalf("expected count to increase after Start, got %d (was %d)", c2, c1)
+	}
+}
+
 func TestAdvance_RegisterDuringAdvance(t *testing.T) {
 	s := NewScheduler()
 	var runs atomic.Int64
