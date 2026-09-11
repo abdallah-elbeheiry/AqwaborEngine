@@ -54,12 +54,13 @@ type AdvanceResult struct {
 
 // job is a single scheduled function with its own tick counter and period.
 type job struct {
-	fn     func(TickState)
-	every  uint   // master ticks between invocations; ≥ 1
-	tick   uint64 // how many times this job has fired
-	next   uint64 // simTicks value at which this job is next due
-	paused atomic.Bool
-	drop   atomic.Uint64 // total dropped ticks for this job
+	fn      func(TickState)
+	every   uint   // master ticks between invocations; ≥ 1
+	tick    uint64 // how many times this job has fired
+	next    uint64 // simTicks value at which this job is next due
+	paused  atomic.Bool
+	removed atomic.Bool
+	drop    atomic.Uint64 // total dropped ticks for this job
 
 	regOrder uint64 // registration sequence, for stable ordering within same every
 }
@@ -67,23 +68,47 @@ type job struct {
 // Job is a handle returned by Run for per-job control.
 type Job struct {
 	j *job
+	s *Scheduler
 }
 
-// Pause freezes this job. It is skipped during advance and its tick index
-// does not advance. Resume unfreezes it.
+// Pause freezes this job. It is skipped during advance, its tick index
+// does not advance, and its deadline does not move. Resume unfreezes it.
 func (h Job) Pause() {
+	if h.j == nil {
+		return
+	}
 	h.j.paused.Store(true)
 }
 
 // Resume unfreezes a paused job. The next advance picks up from where it
 // left off.
 func (h Job) Resume() {
+	if h.j == nil {
+		return
+	}
 	h.j.paused.Store(false)
 }
 
-// Stop unregisters this job. It will not fire on subsequent advances.
+// Stop unregisters this job permanently. It is removed from the job list
+// and will not fire on subsequent advances. Nil-safe (no-op on an empty
+// Job returned by Run with every=0).
 func (h Job) Stop() {
+	if h.j == nil || h.s == nil {
+		return
+	}
+	h.j.removed.Store(true)
 	h.j.paused.Store(true)
+	h.s.mu.Lock()
+	h.s.removeJob(h.j)
+	h.s.mu.Unlock()
+}
+
+// Tick returns this job's own tick counter.
+func (h Job) Tick() uint64 {
+	if h.j == nil {
+		return 0
+	}
+	return h.j.tick
 }
 
 // jobRun is one job paired with its function captured for this advance.
@@ -103,9 +128,10 @@ type jobRun struct {
 // deterministic, replayable, and race-free without any locking inside
 // Advance.
 //
-// Run may be called concurrently with Advance. The job list is published
-// via atomic copy-on-write and the sorted order is published via an atomic
-// pointer, so Advance always sees a consistent snapshot without locking.
+// Run and Job.Stop may be called concurrently with Advance. The job list
+// is published via atomic copy-on-write and the sorted order is published
+// via an atomic pointer, so Advance always sees a consistent snapshot
+// without locking.
 type Scheduler struct {
 	jobs      []*job
 	jobOrder  atomic.Pointer[[]jobRun]
@@ -118,7 +144,7 @@ type Scheduler struct {
 	speed      atomic.Uint64 // float64 bits
 	paused     atomic.Bool
 
-	mu sync.Mutex // protects jobs slice (Run)
+	mu sync.Mutex // protects jobs slice (Run, Stop, Clear, Reset)
 }
 
 func NewScheduler() *Scheduler {
@@ -129,8 +155,8 @@ func NewScheduler() *Scheduler {
 	return s
 }
 
-// SetMasterHz sets the master tick rate. Must be called before AdvanceTicks.
-// Rejects 0 and values above 1000.
+// SetMasterHz sets the master tick rate. Must be called before Advance or
+// AdvanceTicks. Rejects 0 and values above 1000.
 func (s *Scheduler) SetMasterHz(hz uint) {
 	if hz == 0 || hz > 1000 {
 		log.Warn("SetMasterHz ignored: must be 1..1000", "hz", hz)
@@ -185,7 +211,7 @@ func (s *Scheduler) SetMaxCatchUp(n int) {
 }
 
 // Run registers fn to be called every n master ticks. Returns a Job handle
-// for per-job pause / resume / stop.
+// for per-job pause / resume / stop. Panics if master Hz has not been set.
 //
 // Registering after the first advance is allowed: the advance picks up the
 // change at its next call rather than reading the slice while it is being
@@ -198,6 +224,9 @@ func (s *Scheduler) Run(fn func(TickState), every uint) Job {
 		log.Warn("Run ignored: every must be ≥ 1", "every", every)
 		return Job{}
 	}
+	if s.masterHz.Load() == 0 {
+		panic("schedulers: Run called before SetMasterHz")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -209,7 +238,7 @@ func (s *Scheduler) Run(fn func(TickState), every uint) Job {
 	s.jobs = append(s.jobs, j)
 	s.rebuildOrder()
 	log.Debug("registered job", "every", every, "total_jobs", len(s.jobs))
-	return Job{j: j}
+	return Job{j: j, s: s}
 }
 
 // rebuildOrder rebuilds the sorted job list and publishes it atomically.
@@ -218,6 +247,9 @@ func (s *Scheduler) Run(fn func(TickState), every uint) Job {
 func (s *Scheduler) rebuildOrder() {
 	runs := make([]jobRun, 0, len(s.jobs))
 	for _, j := range s.jobs {
+		if j.removed.Load() {
+			continue
+		}
 		runs = append(runs, jobRun{j: j, fn: j.fn})
 	}
 	sort.SliceStable(runs, func(i, j int) bool {
@@ -232,6 +264,8 @@ func (s *Scheduler) rebuildOrder() {
 // Advance advances the clock by exactly simDT of simulation time. Speed is
 // ignored. When the scheduler is paused, Advance is a no-op.
 //
+// Advance panics if SetMasterHz has not been called.
+//
 // Advance must not be called concurrently. It is the single writer to
 // simTicks, simTimeNs, and the per-job tick/deadline state.
 func (s *Scheduler) Advance(simDT time.Duration) AdvanceResult {
@@ -243,10 +277,11 @@ func (s *Scheduler) Advance(simDT time.Duration) AdvanceResult {
 	}
 
 	hz := s.masterHz.Load()
-	var ticks uint64
-	if hz > 0 {
-		ticks = uint64(float64(simDT) * float64(hz) / float64(time.Second))
+	if hz == 0 {
+		panic("schedulers: Advance called before SetMasterHz")
 	}
+
+	ticks := uint64(float64(simDT) * float64(hz) / float64(time.Second))
 	if ticks == 0 {
 		return AdvanceResult{}
 	}
@@ -270,6 +305,8 @@ func (s *Scheduler) Advance(simDT time.Duration) AdvanceResult {
 // AdvanceTicks advances the clock by n master ticks, scaled by speed.
 // AdvanceTicks(0) and negative values are no-ops. When speed ≤ 0,
 // AdvanceTicks advances nothing. When paused, AdvanceTicks is a no-op.
+//
+// AdvanceTicks panics if SetMasterHz has not been called.
 func (s *Scheduler) AdvanceTicks(n int) AdvanceResult {
 	if n <= 0 {
 		return AdvanceResult{}
@@ -283,8 +320,7 @@ func (s *Scheduler) AdvanceTicks(n int) AdvanceResult {
 	}
 	hz := s.masterHz.Load()
 	if hz == 0 {
-		log.Warn("AdvanceTicks called but MasterHz is not set")
-		return AdvanceResult{}
+		panic("schedulers: AdvanceTicks called before SetMasterHz")
 	}
 	scaledTicks := uint64(float64(n) * speed)
 	if scaledTicks == 0 {
@@ -293,7 +329,7 @@ func (s *Scheduler) AdvanceTicks(n int) AdvanceResult {
 
 	s.simTicks.Add(scaledTicks)
 	quantum := time.Duration(float64(time.Second) / float64(hz))
-	s.simTimeNs.Add(int64(quantum) * int64(n))
+	s.simTimeNs.Add(int64(quantum) * int64(scaledTicks))
 
 	newSimTicks := s.simTicks.Load()
 	result := AdvanceResult{}
@@ -309,19 +345,24 @@ func (s *Scheduler) AdvanceTicks(n int) AdvanceResult {
 	return result
 }
 
-// advanceJob fires ticks for one job whose deadline is at or before simTicks,
-// up to maxCatchUp ticks. Excess overdue ticks are counted as dropped.
+// advanceJob fires ticks for one job whose deadline is before simTicks,
+// up to maxCatchUp ticks. Paused jobs skip the fire loop entirely — their
+// deadline does not advance and they do not consume catch-up budget.
+// Excess overdue ticks (from non-paused jobs) are counted as dropped.
 func (s *Scheduler) advanceJob(jr jobRun, simTicks uint64) (fired int, dropped uint64) {
 	g := jr.j
+
+	if g.removed.Load() || g.paused.Load() {
+		return 0, 0
+	}
+
 	maxCatchUp := int(s.maxCatchUp.Load())
 
 	ran := 0
 	for g.next < simTicks && ran < maxCatchUp {
-		if !g.paused.Load() {
-			state := TickState{Tick: g.tick, Hz: float64(s.masterHz.Load()) / float64(g.every)}
-			s.call(jr.fn, state, g)
-			g.tick++
-		}
+		state := TickState{Tick: g.tick, Hz: float64(s.masterHz.Load()) / float64(g.every)}
+		s.call(jr.fn, state, g)
+		g.tick++
 		g.next += uint64(g.every)
 		ran++
 	}
@@ -364,7 +405,9 @@ func (s *Scheduler) Dropped() uint64 {
 	return n
 }
 
-// Ticks is how many ticks a job with the given every value has fired.
+// Ticks returns how many ticks the first job with the given every value has
+// fired. If multiple jobs share the same every, only the first (by
+// registration order) is returned. For per-job counts, use Job.Tick().
 func (s *Scheduler) Ticks(every uint) uint64 {
 	order := s.jobOrder.Load()
 	if order == nil {
@@ -408,6 +451,20 @@ func (s *Scheduler) Clear() {
 	defer s.mu.Unlock()
 	s.jobs = nil
 	s.jobOrder.Store(nil)
+}
+
+// Internals <------v
+
+// removeJob removes a single job from the jobs slice and rebuilds the order.
+// Must be called under s.mu.
+func (s *Scheduler) removeJob(target *job) {
+	for i, j := range s.jobs {
+		if j == target {
+			s.jobs = append(s.jobs[:i], s.jobs[i+1:]...)
+			break
+		}
+	}
+	s.rebuildOrder()
 }
 
 // call runs one tick function, recovering so that one system panicking does not

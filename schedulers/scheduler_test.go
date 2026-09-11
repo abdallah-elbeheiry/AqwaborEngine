@@ -672,16 +672,6 @@ func TestAdvanceTicks_NegativeNoOp(t *testing.T) {
 	}
 }
 
-func TestAdvanceTicks_NoMasterHzNoOp(t *testing.T) {
-	s := NewScheduler()
-	// MasterHz not set.
-
-	result := s.AdvanceTicks(10)
-	if result.Fired != 0 {
-		t.Fatalf("expected 0 ticks when MasterHz unset, got %d", result.Fired)
-	}
-}
-
 func TestAdvanceTicks_SpeedScales(t *testing.T) {
 	s := NewScheduler()
 	s.SetMasterHz(60)
@@ -813,21 +803,24 @@ func TestJob_PauseResume(t *testing.T) {
 
 	job := s.Run(func(st TickState) { count.Add(1) }, 1)
 
-	s.Advance(50 * time.Millisecond) // 3 ticks
+	s.Advance(50 * time.Millisecond) // 3 ticks → count=3
 	if count.Load() != 3 {
 		t.Fatalf("before pause: expected 3, got %d", count.Load())
 	}
 
 	job.Pause()
-	s.Advance(50 * time.Millisecond) // 3 more ticks, but job paused
+	s.Advance(50 * time.Millisecond) // paused → 0 ticks, next frozen at 3
 	if count.Load() != 3 {
 		t.Fatalf("after pause: expected 3 (unchanged), got %d", count.Load())
 	}
 
+	// Resume: next was frozen at 3, simTicks advanced to 6 during pause.
+	// Advance 50ms more → simTicks=9. Job catches up: ticks 3..8 → 6 ticks.
 	job.Resume()
-	s.Advance(50 * time.Millisecond) // 3 more ticks, job resumes
-	if count.Load() != 6 {
-		t.Fatalf("after resume: expected 6, got %d", count.Load())
+	s.Advance(50 * time.Millisecond)
+	// Total = 3 (before) + 6 (catch-up) = 9
+	if count.Load() != 9 {
+		t.Fatalf("after resume: expected 9, got %d", count.Load())
 	}
 }
 
@@ -882,18 +875,16 @@ func TestJob_PauseFrozenTickIndex(t *testing.T) {
 	}
 
 	job.Pause()
-	s.Advance(200 * time.Millisecond) // 12 ticks, but paused
-	// tick should NOT have advanced
+	s.Advance(50 * time.Millisecond) // paused → 0 ticks, next frozen at 3, simTicks=6
 	if lastTick.Load() != 2 {
 		t.Fatalf("while paused: expected tick 2 (frozen), got %d", lastTick.Load())
 	}
 
+	// Resume: next was frozen at 3, simTicks=6 → catches up ticks 3,4,5.
 	job.Resume()
-	s.Advance(1 * time.Millisecond) // 0 ticks (less than one quantum at 60Hz)
-	// Still frozen at 2 because no new ticks fired
-	s.Advance(50 * time.Millisecond) // 3 ticks → tick values 3,4,5
-	if lastTick.Load() != 5 {
-		t.Fatalf("after resume: expected tick 5, got %d", lastTick.Load())
+	s.Advance(50 * time.Millisecond) // simTicks=9, catches up 3..8 → lastTick=8
+	if lastTick.Load() != 8 {
+		t.Fatalf("after resume: expected tick 8, got %d", lastTick.Load())
 	}
 }
 
@@ -1129,6 +1120,66 @@ func TestAdvance_InvalidEvery(t *testing.T) {
 	job := s.Run(func(TickState) {}, 0)
 	if job.j != nil {
 		t.Fatal("expected nil job for every=0")
+	}
+}
+
+func TestAdvance_NoMasterHzPanics(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic when Advance called before SetMasterHz")
+		}
+	}()
+	s := NewScheduler()
+	s.Advance(100 * time.Millisecond)
+}
+
+func TestAdvanceTicks_NoMasterHzPanics(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic when AdvanceTicks called before SetMasterHz")
+		}
+	}()
+	s := NewScheduler()
+	s.AdvanceTicks(10)
+}
+
+func TestRun_NoMasterHzPanics(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic when Run called before SetMasterHz")
+		}
+	}()
+	s := NewScheduler()
+	s.Run(func(TickState) {}, 1)
+}
+
+func TestJob_Tick(t *testing.T) {
+	s := NewScheduler()
+	s.SetMasterHz(60)
+
+	job := s.Run(func(TickState) {}, 1)
+	if job.Tick() != 0 {
+		t.Fatalf("expected initial tick 0, got %d", job.Tick())
+	}
+
+	s.Advance(50 * time.Millisecond) // 3 ticks
+	if job.Tick() != 3 {
+		t.Fatalf("expected tick 3, got %d", job.Tick())
+	}
+
+	s.Advance(50 * time.Millisecond) // 3 more
+	if job.Tick() != 6 {
+		t.Fatalf("expected tick 6, got %d", job.Tick())
+	}
+}
+
+func TestJob_StopNilSafe(t *testing.T) {
+	var empty Job
+	empty.Stop() // should not panic
+	empty.Pause()
+	empty.Resume()
+	if empty.Tick() != 0 {
+		t.Fatal("expected 0 from empty Job.Tick()")
 	}
 }
 

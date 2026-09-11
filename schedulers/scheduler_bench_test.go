@@ -188,7 +188,7 @@ func BenchmarkScheduler_SpeedScaling(b *testing.B) {
 		name := "Speed_" + strconv.FormatFloat(speed, 'f', 1, 64) + "x"
 		b.Run(name, func(b *testing.B) {
 			s := NewScheduler()
-			s.SetMasterHz(1000) // Respect 1000Hz max
+			s.SetMasterHz(1000)
 			s.SetSpeed(speed)
 
 			var count atomic.Int64
@@ -203,14 +203,15 @@ func BenchmarkScheduler_SpeedScaling(b *testing.B) {
 				count.Add(1)
 			}, 1)
 
-			quantum := time.Millisecond
+			// Use n=10 so even at speed=0.1 we get 1 scaled tick.
+			const n = 10
 
 			b.ResetTimer()
 			start := time.Now()
 			startCount := count.Load()
 
 			for i := 0; i < b.N; i++ {
-				s.Advance(quantum)
+				s.AdvanceTicks(n)
 			}
 
 			elapsed := time.Since(start)
