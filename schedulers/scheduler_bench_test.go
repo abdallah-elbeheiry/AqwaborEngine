@@ -19,17 +19,15 @@ func BenchmarkScheduler_TickThroughput(b *testing.B) {
 				count.Add(1)
 			}, hz)
 
-			s.Start()
-			defer s.Stop()
-
-			time.Sleep(50 * time.Millisecond)
+			// Use Advance directly instead of the pacer.
+			interval := time.Duration(float64(time.Second) / hz)
 
 			b.ResetTimer()
 			start := time.Now()
 			startCount := count.Load()
 
 			for i := 0; i < b.N; i++ {
-				time.Sleep(time.Millisecond)
+				s.Advance(interval)
 			}
 
 			elapsed := time.Since(start)
@@ -55,17 +53,14 @@ func BenchmarkScheduler_MathThroughput(b *testing.B) {
 				count.Add(1)
 			}, 100_000.0)
 
-			s.Start()
-			defer s.Stop()
-
-			time.Sleep(50 * time.Millisecond)
+			interval := time.Duration(float64(time.Second) / 100_000.0)
 
 			b.ResetTimer()
 			start := time.Now()
 			startCount := count.Load()
 
 			for i := 0; i < b.N; i++ {
-				time.Sleep(time.Millisecond)
+				s.Advance(interval)
 			}
 
 			elapsed := time.Since(start)
@@ -88,17 +83,14 @@ func BenchmarkScheduler_MaxSpeedMath(b *testing.B) {
 		count.Add(1)
 	}, 1_000_000.0)
 
-	s.Start()
-	defer s.Stop()
-
-	time.Sleep(50 * time.Millisecond)
+	interval := time.Duration(float64(time.Second) / 1_000_000.0)
 
 	b.ResetTimer()
 	start := time.Now()
 	startCount := count.Load()
 
 	for i := 0; i < b.N; i++ {
-		time.Sleep(time.Millisecond)
+		s.Advance(interval)
 	}
 
 	elapsed := time.Since(start)
@@ -146,10 +138,12 @@ func BenchmarkScheduler_MultiRateThroughput(b *testing.B) {
 		count1k.Add(1)
 	}, 1_000.0)
 
-	s.Start()
-	defer s.Stop()
-
-	time.Sleep(50 * time.Millisecond)
+	intervals := map[float64]time.Duration{
+		1_000_000.0: time.Duration(float64(time.Second) / 1_000_000.0),
+		100_000.0:   time.Duration(float64(time.Second) / 100_000.0),
+		10_000.0:    time.Duration(float64(time.Second) / 10_000.0),
+		1_000.0:     time.Duration(float64(time.Second) / 1_000.0),
+	}
 
 	b.ResetTimer()
 	start := time.Now()
@@ -159,7 +153,10 @@ func BenchmarkScheduler_MultiRateThroughput(b *testing.B) {
 	c1k := count1k.Load()
 
 	for i := 0; i < b.N; i++ {
-		time.Sleep(time.Millisecond)
+		s.Advance(intervals[1_000_000.0])
+		s.Advance(intervals[100_000.0])
+		s.Advance(intervals[10_000.0])
+		s.Advance(intervals[1_000.0])
 	}
 
 	elapsed := time.Since(start)
@@ -182,22 +179,22 @@ func BenchmarkScheduler_SpeedScaling(b *testing.B) {
 		count.Add(1)
 	}, 10_000.0)
 
-	s.Start()
-	defer s.Stop()
+	interval := time.Duration(float64(time.Second) / 10_000.0)
+
+	b.ResetTimer()
 
 	speeds := []float64{0.1, 0.5, 1.0, 2.0, 10.0, 100.0}
 	for _, speed := range speeds {
 		name := "Speed_" + strconv.FormatFloat(speed, 'f', 1, 64) + "x"
 		b.Run(name, func(b *testing.B) {
 			s.SetSpeed(speed)
-			time.Sleep(30 * time.Millisecond)
 
 			b.ResetTimer()
 			start := time.Now()
 			startCount := count.Load()
 
 			for i := 0; i < b.N; i++ {
-				time.Sleep(time.Millisecond)
+				s.Advance(interval)
 			}
 
 			elapsed := time.Since(start)

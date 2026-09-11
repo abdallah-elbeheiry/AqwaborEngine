@@ -43,16 +43,26 @@ func (t TickState) Delta() float64 {
 // Extreme time scaling is what finds this, and the loop is meant to survive it.
 const DefaultMaxCatchUp = 8
 
+// AdvanceResult reports what Advance fired and dropped.
+type AdvanceResult struct {
+	// Fired is the total number of ticks fired across all rate groups.
+	Fired int
+	// Dropped is the total number of ticks discarded across all rate groups.
+	Dropped uint64
+}
+
 type rateGroup struct {
 	hz       float64
-	interval float64
+	interval time.Duration
+
+	// next is the simulation-time deadline for the next tick,
+	// measured as a duration from simulation time zero.
+	// After firing n ticks: next = n * interval.
+	next time.Duration
 
 	// fns is replaced rather than appended to, so a snapshot taken under the
 	// lock keeps a slice nothing will write into afterwards.
 	fns []func(TickState)
-
-	// accum belongs to the run goroutine alone.
-	accum float64
 
 	// tick and dropped are written by the run goroutine and read by callers, so
 	// they are atomic rather than guarded: reading them must not have to wait
@@ -69,8 +79,15 @@ type groupRun struct {
 	fns []func(TickState)
 }
 
-// Scheduler runs registered functions at fixed rates, driven by one background
-// goroutine.
+// Scheduler runs registered functions at fixed rates.
+//
+// The deterministic core is Advance: given a simulation-time delta, it decides
+// which ticks fire and which are dropped. No wall clock, timer, or goroutine
+// participates in that decision.
+//
+// The optional pacer goroutine started by Start only translates wall time into
+// simulation-time deltas and feeds them to Advance. If the pacer is not
+// started, the scheduler is still fully usable via Advance alone.
 type Scheduler struct {
 	mu      sync.Mutex
 	groups  map[float64]*rateGroup
@@ -82,8 +99,15 @@ type Scheduler struct {
 
 	maxCatchUp int
 
-	stopCh chan struct{}
-	doneCh chan struct{}
+	stopCh         chan struct{}
+	doneCh         chan struct{}
+	stateChangedCh chan struct{} // buffered signal for pause/resume/speed/register
+	timer          *time.Timer
+
+	// Core state: simTime is the total simulation time advanced.
+	// lastWall is the wall time of the last pacer advance.
+	simTime  time.Duration
+	lastWall time.Time
 }
 
 func NewScheduler() *Scheduler {
@@ -121,7 +145,8 @@ func (s *Scheduler) Run(fn func(TickState), hz float64) {
 
 	g, ok := s.groups[hz]
 	if !ok {
-		g = &rateGroup{hz: hz, interval: 1 / hz}
+		interval := time.Duration(float64(time.Second) / hz)
+		g = &rateGroup{hz: hz, interval: interval, next: 0}
 		s.groups[hz] = g
 	}
 	// Copy before appending. The run goroutine may be holding the old slice, and
@@ -130,7 +155,8 @@ func (s *Scheduler) Run(fn func(TickState), hz float64) {
 	copy(fns, g.fns)
 	g.fns = append(fns, fn)
 	s.dirty = true
-	log.Debug("registered tick function", "hz", hz, "interval_s", g.interval, "total_fns", len(g.fns))
+	log.Debug("registered tick function", "hz", hz, "interval", g.interval, "total_fns", len(g.fns))
+	s.signal()
 }
 
 // snapshot rebuilds the ordered group list when registrations have changed.
@@ -149,6 +175,91 @@ func (s *Scheduler) snapshot() []groupRun {
 	return s.order
 }
 
+// signal sends a non-blocking notification to the run loop so it recomputes
+// the earliest deadline and arms the timer.
+func (s *Scheduler) signal() {
+	select {
+	case s.stateChangedCh <- struct{}{}:
+	default:
+	}
+}
+
+// Advance runs every tick that is due after adding simDT of simulation time.
+// It returns how many ticks were fired and how many were dropped across all
+// rate groups.
+//
+// Advance is pure: given the same sequence of simDT/speed/pause values it
+// always produces the same Tick sequence and function call order. It makes no
+// calls to time.Now, uses no timers, and spawns no goroutines.
+//
+// When speed is 0 or the scheduler is paused, Advance is a no-op and returns
+// an empty result.
+func (s *Scheduler) Advance(simDT time.Duration) AdvanceResult {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if simDT <= 0 || s.speed == 0 || s.paused {
+		return AdvanceResult{}
+	}
+
+	s.simTime += simDT
+	result := AdvanceResult{}
+
+	for _, gr := range s.snapshot() {
+		fired, dropped := s.advanceGroup(gr, s.simTime)
+		result.Fired += fired
+		result.Dropped += dropped
+	}
+
+	return result
+}
+
+// advanceGroup fires ticks for one rate group whose deadline is at or before
+// simTime, up to maxCatchUp ticks. Excess overdue ticks are counted as
+// dropped and the deadline is jumped forward.
+func (s *Scheduler) advanceGroup(gr groupRun, simTime time.Duration) (fired int, dropped uint64) {
+	g := gr.g
+	if s.speed <= 0 {
+		return 0, 0
+	}
+
+	ran := 0
+	for g.next <= simTime && ran < s.maxCatchUp {
+		state := TickState{Tick: g.tick.Load(), Hz: g.hz}
+		for _, fn := range gr.fns {
+			s.call(fn, state, g)
+		}
+		g.tick.Add(1)
+		g.next = g.next + g.interval
+		ran++
+	}
+
+	if g.next <= simTime {
+		overdue := simTime - g.next
+		owed := overdue / g.interval
+		if owed > 0 {
+			dropped = g.dropped.Add(uint64(owed))
+			g.next = g.next + time.Duration(owed)*g.interval
+			log.Debug("rate fell behind and dropped ticks",
+				"hz", g.hz, "dropped", owed, "total_dropped", dropped)
+		}
+	}
+
+	return ran, dropped
+}
+
+// earliestDeadlineLocked returns the earliest simulation-time deadline across
+// all groups, or 0 if none. Caller must hold s.mu.
+func (s *Scheduler) earliestDeadlineLocked() time.Duration {
+	var earliest time.Duration
+	for _, gr := range s.snapshot() {
+		if earliest == 0 || gr.g.next < earliest {
+			earliest = gr.g.next
+		}
+	}
+	return earliest
+}
+
 func (s *Scheduler) Start() {
 	s.mu.Lock()
 	if s.running {
@@ -157,8 +268,18 @@ func (s *Scheduler) Start() {
 	}
 	s.running = true
 	s.paused = false
+	s.simTime = 0
+	s.lastWall = time.Now()
+	// Reset all group deadlines to simulation time zero so Start is idempotent.
+	for _, gr := range s.groups {
+		gr.next = 0
+	}
 	s.stopCh = make(chan struct{})
 	s.doneCh = make(chan struct{})
+	s.stateChangedCh = make(chan struct{}, 16)
+	s.timer = time.NewTimer(0)
+	// Drain the immediate fire from the zero-duration timer.
+	<-s.timer.C
 	rates := make([]float64, 0, len(s.groups))
 	for _, gr := range s.snapshot() {
 		rates = append(rates, gr.g.hz)
@@ -179,10 +300,17 @@ func (s *Scheduler) Stop() {
 	s.running = false
 	stopCh := s.stopCh
 	doneCh := s.doneCh
+	timer := s.timer
 	s.mu.Unlock()
 
 	log.Debug("scheduler stopping")
 	close(stopCh)
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
 	<-doneCh
 }
 
@@ -190,12 +318,14 @@ func (s *Scheduler) Pause() {
 	s.mu.Lock()
 	s.paused = true
 	s.mu.Unlock()
+	s.signal()
 }
 
 func (s *Scheduler) Resume() {
 	s.mu.Lock()
 	s.paused = false
 	s.mu.Unlock()
+	s.signal()
 }
 
 func (s *Scheduler) SetSpeed(speed float64) {
@@ -205,6 +335,7 @@ func (s *Scheduler) SetSpeed(speed float64) {
 	s.mu.Lock()
 	s.speed = speed
 	s.mu.Unlock()
+	s.signal()
 	log.Debug("scheduler speed changed", "speed", speed)
 }
 
@@ -238,63 +369,89 @@ func (s *Scheduler) Ticks(hz float64) uint64 {
 	return 0
 }
 
+// run is the optional real-time pacer. It measures wall-clock elapsed time,
+// scales it by speed into a simulation-time delta, and calls Advance.
+//
+// It uses wall time only to decide when to call Advance and with how much
+// simDT. It never decides which ticks run — that is entirely Advance's job.
+// The pacer can be disabled entirely; Advance works without it.
 func (s *Scheduler) run() {
 	defer close(s.doneCh)
 
-	ticker := time.NewTicker(time.Millisecond)
-	defer ticker.Stop()
+	timer := s.timer
+	var wallNow time.Time
 
-	last := time.Now()
 	for {
+		s.mu.Lock()
+		running := s.running
+		paused := s.paused
+		speed := s.speed
+		groups := s.snapshot()
+		if !running {
+			s.mu.Unlock()
+			return
+		}
+		s.mu.Unlock()
+
+		if paused || speed == 0 || len(groups) == 0 {
+			select {
+			case <-s.stopCh:
+				return
+			case <-s.stateChangedCh:
+				continue
+			}
+		}
+
+		// Compute simulation-time delta from wall elapsed time.
+		wallNow = time.Now()
+		simDT := time.Duration(float64(wallNow.Sub(s.lastWall)) * speed)
+		s.lastWall = wallNow
+
+		if simDT > 0 {
+			s.Advance(simDT)
+		}
+
+		// Find the earliest simulation deadline and sleep until then.
+		s.mu.Lock()
+		earliest := s.earliestDeadlineLocked()
+		simTime := s.simTime
+		speed = s.speed
+		s.mu.Unlock()
+
+		if earliest > 0 && earliest <= simTime {
+			// Already due; don't sleep.
+			continue
+		}
+
+		var targetWall time.Time
+		if earliest > 0 {
+			additionalWall := time.Duration(float64(earliest-simTime) / speed)
+			targetWall = wallNow.Add(additionalWall)
+		} else {
+			targetWall = wallNow.Add(time.Millisecond)
+		}
+		remaining := max(time.Until(targetWall), time.Millisecond)
+		timer.Reset(remaining)
+
 		select {
 		case <-s.stopCh:
 			return
-		case now := <-ticker.C:
-			wallDT := now.Sub(last).Seconds()
-			last = now
-
-			s.mu.Lock()
-			if !s.running || s.paused || s.speed == 0 {
-				s.mu.Unlock()
-				continue
-			}
-			speed := s.speed
-			maxCatchUp := s.maxCatchUp
-			groups := s.snapshot()
-			s.mu.Unlock()
-
-			simDT := wallDT * speed
-			for _, gr := range groups {
-				s.step(gr, simDT, maxCatchUp)
-			}
+		case <-s.stateChangedCh:
+			timer.Stop()
+			drainTimer(timer)
+			continue
+		case <-timer.C:
+			// Fall through to compute the next simDT.
 		}
 	}
 }
 
-// step advances one rate group, running at most maxCatchUp ticks. Whatever is
-// still owed past that is discarded rather than carried, because carrying it is
-// what compounds into the spiral.
-func (s *Scheduler) step(gr groupRun, simDT float64, maxCatchUp int) {
-	g := gr.g
-	g.accum += simDT
-
-	ran := 0
-	for g.accum >= g.interval && ran < maxCatchUp {
-		state := TickState{Tick: g.tick.Load(), Hz: g.hz}
-		for _, fn := range gr.fns {
-			s.call(fn, state, g)
-		}
-		g.tick.Add(1)
-		g.accum -= g.interval
-		ran++
-	}
-
-	if g.accum >= g.interval {
-		owed := uint64(g.accum / g.interval)
-		total := g.dropped.Add(owed)
-		g.accum -= float64(owed) * g.interval
-		log.Debug("rate fell behind and dropped ticks",
-			"hz", g.hz, "dropped", owed, "total_dropped", total)
+// drainTimer ensures a timer is fully stopped and its channel drained.
+func drainTimer(timer *time.Timer) {
+	timer.Stop()
+	select {
+	case <-timer.C:
+	default:
 	}
 }
 

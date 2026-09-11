@@ -3,7 +3,7 @@ title: Scheduling
 tags: [engine, aqwabor, schedulers]
 ---
 
-Two things decide when code runs. A `Scheduler` drives fixed-rate ticks off a background goroutine.
+Two things decide when code runs. A `Scheduler` drives fixed-rate ticks from a pure deterministic core.
 A `Schedule` decides, within one tick, what may run at the same time as what.
 
 They are separable: a game can drive ticks itself and still use a `Schedule`, or run a `Scheduler`
@@ -11,10 +11,42 @@ with plain functions and no access declarations at all.
 
 ## Fixed-rate ticks
 
+The scheduler has two layers. The **deterministic core** (`Advance`) decides which ticks fire using
+only simulation time — no wall clock, no timers, no goroutines. The **optional pacer** (`Start` /
+`Stop`) translates wall-clock elapsed time into simulation-time deltas and feeds them to the core.
+
+A game that only calls `Run` + `Start` keeps the same experience it always had. A test that calls
+`Advance` directly gets a fully deterministic, replayable, zero-sleeping simulation.
+
+### Direct control with Advance
+
+`Advance` is the pure entry point. Given a simulation-time delta, it fires every tick that is due,
+returns what happened, and never touches the wall clock.
+
 ```go
 s := schedulers.NewScheduler()
 s.Run(simulate, 120)      // 120 Hz
 s.Run(autosave, 0.1)      // once every ten seconds
+
+result := s.Advance(time.Second / 60)   // advance 1/60th of a second of simulation time
+result.Fired                              // total ticks fired across all rates
+result.Dropped                            // ticks discarded by catch-up
+```
+
+Given the same sequence of `Advance` calls and the same speed / pause settings, the sequence of
+`Tick` values and the order of function calls are bit-for-bit identical across runs, machines,
+and load conditions.
+
+### Real-time pacer
+
+`Start` launches a background goroutine that measures wall-clock elapsed time, scales it by the
+current speed, and calls `Advance` with the resulting delta. The goroutine sleeps until the next
+tick is due, then wakes and repeats.
+
+```go
+s := schedulers.NewScheduler()
+s.Run(simulate, 120)
+s.Run(autosave, 0.1)
 
 s.Start()
 s.SetSpeed(3)             // three times as fast; scales every rate
@@ -23,7 +55,10 @@ s.Resume()
 s.Stop()
 ```
 
-Each rate keeps its own accumulator and its own tick count. Functions registered at the same rate run
+`Advance` works without `Start` and `Start` is never required. The pacer is a convenience for
+real-time games; tests and replay tools never need it.
+
+Each rate keeps its own deadline and its own tick count. Functions registered at the same rate run
 together, in registration order; rates run in ascending order, so two runs of the same registrations
 tick in the same order.
 
@@ -44,16 +79,19 @@ func (t TickState) Delta() float64   // 1/hz, fixed regardless of how far behind
 The tick count is the primary field. A simulation counting in integers should not be obliged to carry
 a float, and a rate is `rate * ticks / hz` rather than an accumulated delta.
 
+All simulation time is `time.Duration` (integer nanoseconds). No float accumulators are used for
+tick deadlines.
+
 ### Falling behind
 
-Catch-up is bounded. A rate runs at most `MaxCatchUp` ticks a wake, eight by default, and discards
-what it still owes past that.
+Catch-up is bounded. A rate runs at most `MaxCatchUp` ticks per `Advance` call, eight by default,
+and discards what it still owes past that.
 
-Without the bound, a tick that overran its budget left a larger accumulator, so the next wake ran
-more ticks, which overran further: the fixed-timestep spiral. With it, the simulation runs slower
-than wall time, which is the correct failure — it degrades to a lower effective rate rather than
-falling further behind on every wake. Extreme time scaling is the condition that finds this, and the
-loop is meant to survive it.
+Without the bound, a tick that overran its budget left a growing gap between the current simulation
+time and the next deadline, so the next wake ran more ticks, which overran further: the
+fixed-timestep spiral. With it, the simulation runs slower than wall time, which is the correct
+failure — it degrades to a lower effective rate rather than falling further behind on every wake.
+Extreme time scaling is the condition that finds this, and the loop is meant to survive it.
 
 ```go
 s.SetMaxCatchUp(4)
@@ -62,6 +100,17 @@ s.Ticks(120)     // how many ticks a rate has run
 ```
 
 `Dropped` is the number to watch when time scaling is turned up.
+
+### Replay and testing
+
+Because `Advance` is pure, tests can drive the scheduler without goroutines, sleeps, or wall clocks:
+
+1. Register functions.
+2. Call `Advance` with precise `simDT` values.
+3. Assert exact tick counts, exact order, and exact `Tick` values.
+
+A recorded sequence of `Advance` / speed / pause commands can be replayed to produce the exact same
+tick sequence, which is the foundation for deterministic replays.
 
 ## What may run at the same time
 
