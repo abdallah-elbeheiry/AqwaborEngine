@@ -46,7 +46,22 @@ type Scene struct {
 	// stale half of the damage knowable.
 	instances map[ecs.Entity]ViewBounds
 
+	// plan is what Cull encoded, waiting for the Draw that submits it, and
+	// planView is the view it was encoded for. Draw discards a plan made for a
+	// different view rather than drawing the wrong chunks.
+	plan     []submission
+	planView ViewBounds
+	planned  bool
+
 	stats SceneStats
+}
+
+// submission is one range of one layer, either culled on the GPU or drawn as it
+// stands.
+type submission struct {
+	layer  int
+	culled Culled
+	direct instRange
 }
 
 // SceneConfig is what a scene needs to know that it cannot work out.
@@ -352,22 +367,56 @@ func (s *Scene) rebuild(li int) {
 	s.stats.Rebuilt++
 }
 
+// Cull encodes the compute half of a frame and draws nothing.
+//
+// It exists for a frame that draws something other than this scene. A cull is a
+// compute pass and a compute pass cannot be recorded inside a render pass, so
+// every cull in a frame has to be encoded before whatever opens that pass. A
+// caller drawing only this scene never needs it: Draw does both halves in the
+// right order. A caller drawing a Cells layer under the scene does, because the
+// cells open the pass, and without this the scene's culls arrive too late, are
+// refused one per range per frame, and every range is drawn unculled.
+//
+//	scene.Cull(view)   // compute, before anything opens the pass
+//	cells.Draw(view)   // opens the pass
+//	scene.Draw(view)   // submits what Cull planned
+//
+// Call it between Begin and the first draw. The plan it leaves is used by the
+// next Draw for the same view and discarded by a Draw for any other.
+func (s *Scene) Cull(view ViewBounds) {
+	s.plan = s.planDraw(view, s.plan[:0])
+	s.planView = view
+	s.planned = true
+}
+
 // Draw submits the layers in order, through the camera already set on the GPU.
 //
 // It follows the frame's two phases on its own: every cull it needs is encoded
-// before the first draw opens the render pass. Call it between Begin and End.
+// before the first draw opens the render pass. Call it between Begin and End,
+// or after Cull when something else opens the pass first.
 func (s *Scene) Draw(view ViewBounds) {
-	s.stats.Submitted = 0
-	s.stats.Draws = 0
-
-	type submission struct {
-		layer  int
-		culled Culled
-		direct instRange
+	if !s.planned || s.planView != view {
+		s.plan = s.planDraw(view, s.plan[:0])
 	}
+	s.planned = false
 
+	s.stats.Draws = 0
+	for _, p := range s.plan {
+		if p.culled.ok {
+			s.gfx.DrawSpritesCulled(p.culled)
+		} else {
+			s.gfx.DrawSpritesRange(s.layers[p.layer].batch, p.direct.First, p.direct.Count)
+		}
+		s.stats.Draws++
+	}
+	s.plan = s.plan[:0]
+}
+
+// planDraw works out what each layer submits and encodes the culls it wants.
+// This is the half that has to happen before the render pass opens.
+func (s *Scene) planDraw(view ViewBounds, plan []submission) []submission {
+	s.stats.Submitted = 0
 	slots := cullSlots
-	var plan []submission
 
 	for li, l := range s.layers {
 		if l.batch == nil || l.grid.total == 0 {
@@ -386,15 +435,7 @@ func (s *Scene) Draw(view ViewBounds) {
 			plan = append(plan, submission{layer: li, direct: r})
 		}
 	}
-
-	for _, p := range plan {
-		if p.culled.ok {
-			s.gfx.DrawSpritesCulled(p.culled)
-		} else {
-			s.gfx.DrawSpritesRange(s.layers[p.layer].batch, p.direct.First, p.direct.Count)
-		}
-		s.stats.Draws++
-	}
+	return plan
 }
 
 // damageRect records a world rectangle that has to be repainted.
