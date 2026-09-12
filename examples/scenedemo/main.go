@@ -51,6 +51,7 @@ func main() {
 	chunk := flag.Float64("chunk", 64, "chunk side in world units")
 	onDemand := flag.Bool("ondemand", false, "draw only when something changes; -movers 0 with this is an idle world")
 	spread := flag.Bool("spread", true, "spread the movers over the field; false puts them together")
+	floorOn := flag.Bool("floor", true, "draw a cell layer under the sprites, which is what makes the cull ordering matter")
 	flag.Parse()
 
 	win, err := window.NewWindow(window.WindowConfig{
@@ -116,6 +117,8 @@ func main() {
 
 	var gfx *render.GPU
 	var scene *render.Scene
+	var floor *render.Cells
+	var floorCells []uint32
 	var dmg gpucontext.DamageReporter
 	var rects []image.Rectangle
 	var moving []ecs.Entity
@@ -170,6 +173,26 @@ func main() {
 			scene = render.NewScene(gfx, w, comps, render.SceneConfig{ChunkSize: float32(*chunk)})
 			defer func() { reported = time.Now() }()
 
+			// A cell floor under the sprites, because that is the frame shape
+			// the cull ordering exists for: the cells open the render pass and
+			// the scene's culls have to be encoded before they do.
+			if *floorOn {
+				floor = render.NewCells(gfx, render.CellsConfig{
+					W: *side, H: *side, CellSize: 1,
+				})
+				floorCells = make([]uint32, *side**side)
+				for i := range floorCells {
+					floorCells[i] = render.PaletteOf((i/8 + i/(*side*8)) % 4)
+				}
+				var ramp render.RampTable
+				for i := range 4 {
+					g := 0.10 + 0.04*float32(i)
+					ramp.Set(i, g*0.8, g, g*1.2, 1)
+				}
+				gfx.SetRamp(&ramp)
+				floor.TouchAll()
+			}
+
 			// Spread the movers over the field rather than clustering them in
 			// the first chunks, so the cost they cause is spread too.
 			stride := max(1, *side**side/max(*movers, 1))
@@ -222,7 +245,10 @@ func main() {
 			dmg.ReportDamage(rects...)
 		}
 
-		if err := drawFrame(dc, gfx, scene, c, vpW, vpH, &drawMs, &presentMs); err != nil {
+		if floor != nil {
+			floor.Sync(floorCells)
+		}
+		if err := drawFrame(dc, gfx, scene, floor, c, vpW, vpH, &drawMs, &presentMs); err != nil {
 			return
 		}
 
@@ -257,8 +283,13 @@ func main() {
 	}
 }
 
-// drawFrame runs one frame: clear, camera, scene, present.
-func drawFrame(dc *gogpu.Context, gfx *render.GPU, scene *render.Scene, c *camera.Camera, vpW, vpH float32, drawMs, presentMs *float64) error {
+// drawFrame runs one frame: clear, camera, the cell floor, the scene, present.
+//
+// The order is the point. Cells open the render pass, and a cull is a compute
+// pass that cannot be recorded inside one, so the scene's culls are encoded
+// first and submitted after. Drawing the floor and then calling scene.Draw
+// without the Cull ahead of it is the shape that silently loses culling.
+func drawFrame(dc *gogpu.Context, gfx *render.GPU, scene *render.Scene, floor *render.Cells, c *camera.Camera, vpW, vpH float32, drawMs, presentMs *float64) error {
 
 	// Begin acquires the drawable, so on a vsync display this is the wait for
 	// the screen rather than any cost of drawing. Timed apart for that reason.
@@ -272,7 +303,12 @@ func drawFrame(dc *gogpu.Context, gfx *render.GPU, scene *render.Scene, c *camer
 	start = time.Now()
 	gfx.SetCamera(camera.ViewProj(*c, vpW, vpH), vpW, vpH)
 
-	scene.Draw(render.ViewOf(c.X, c.Y, c.Zoom, vpW, vpH))
+	view := render.ViewOf(c.X, c.Y, c.Zoom, vpW, vpH)
+	if floor != nil {
+		scene.Cull(view)
+		floor.Draw(view)
+	}
+	scene.Draw(view)
 
 	*drawMs = time.Since(start).Seconds() * 1000
 
